@@ -119,13 +119,17 @@ class ControlPanel(QWidget):
     def __init__(self, overlay: SpriteOverlay, initial_fps: int = 12):
         super().__init__()
         self.overlay = overlay
+        self._quitting = False
+
+        # Set window flags BEFORE showing to remove minimize/maximize buttons (macOS-friendly)
+        self.setWindowFlags(
+            Qt.Window |
+            Qt.CustomizeWindowHint |  # allows selecting which buttons appear
+            Qt.WindowTitleHint |       # keep title bar text
+            Qt.WindowCloseButtonHint   # keep only close button
+        )
 
         self.setWindowTitle("Sprite Control Panel")
-        # Remove minimize/maximize buttons; keep title and close
-        self.setWindowFlag(Qt.WindowMinimizeButtonHint, False)
-        self.setWindowFlag(Qt.WindowMaximizeButtonHint, False)
-        self.setWindowFlag(Qt.WindowCloseButtonHint, True)
-        self.setWindowFlag(Qt.WindowTitleHint, True)
 
         root = QVBoxLayout(self)
 
@@ -173,12 +177,16 @@ class ControlPanel(QWidget):
 
     def _on_quit_clicked(self):
         # Quit button explicitly quits the app
+        self._quitting = True
         QApplication.instance().quit()
 
     def closeEvent(self, event):
-        # Close button (X) just hides the panel
-        self.hide()
-        event.ignore()
+        # If quit was requested, allow the window to close; otherwise hide
+        if self._quitting:
+            event.accept()
+        else:
+            self.hide()
+            event.ignore()
 
 
 def load_frames(folder: str) -> list[QPixmap]:
