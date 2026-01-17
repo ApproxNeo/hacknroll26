@@ -7,6 +7,42 @@ from pathlib import Path
 from PySide6.QtGui import QPainter, QPixmap, QMovie
 BASE_DIR = Path(__file__).resolve().parent
 EXPLOSION_GIF = BASE_DIR / "explode.gif"
+PROJECTILE_PNG = BASE_DIR / "projectile.png"
+
+# Cache the projectile pixmap (and scaled variants) so paint events are cheap.
+_PROJECTILE_PIX: QPixmap | None = None
+_PROJECTILE_SCALED: dict[int, QPixmap] = {}
+
+
+def _get_projectile_pixmap(target_size: int) -> QPixmap | None:
+    """Load projectile.png if present and return a scaled pixmap sized ~target_size."""
+    global _PROJECTILE_PIX, _PROJECTILE_SCALED
+    target_size = max(1, int(target_size))
+
+    # Return cached scaled pixmap if available.
+    cached = _PROJECTILE_SCALED.get(target_size)
+    if cached is not None and not cached.isNull():
+        return cached
+
+    # Load base pixmap once.
+    if _PROJECTILE_PIX is None:
+        if PROJECTILE_PNG.exists():
+            pix = QPixmap(str(PROJECTILE_PNG))
+            _PROJECTILE_PIX = pix if not pix.isNull() else None
+        else:
+            _PROJECTILE_PIX = None
+
+    if _PROJECTILE_PIX is None or _PROJECTILE_PIX.isNull():
+        return None
+
+    scaled = _PROJECTILE_PIX.scaled(
+        int(target_size),
+        int(target_size),
+        Qt.KeepAspectRatio,
+        Qt.SmoothTransformation,
+    )
+    _PROJECTILE_SCALED[target_size] = scaled
+    return scaled
 
 from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject, QDateTime, QSize, QThread
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox, QLineEdit, QTextEdit
@@ -435,8 +471,9 @@ class CannonBallOverlay(QWidget):
         self._radius = max(2, int(radius))
         self._arc = int(arc_height)
 
-        # Widget size is just big enough to draw the ball.
+        # Widget size is just big enough to draw the projectile.
         d = self._radius * 4 + 2
+        self._pix = _get_projectile_pixmap(d)
         self.resize(d, d)
 
         # Start at start_pos (centered).
@@ -482,19 +519,28 @@ class CannonBallOverlay(QWidget):
         painter.fillRect(self.rect(), Qt.transparent)
         painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
-        # Draw a simple dark cannonball with a subtle highlight.
-        r = self._radius
-        cx = self.width() // 2
-        cy = self.height() // 2
+        # Draw the projectile image if available; otherwise fall back to a simple cannonball.
+        if getattr(self, "_pix", None) is not None and not self._pix.isNull():
+            x = (self.width() - self._pix.width()) // 2
+            y = (self.height() - self._pix.height()) // 2
+            painter.drawPixmap(int(x), int(y), self._pix)
+        else:
+            r = self._radius
+            cx = self.width() // 2
+            cy = self.height() // 2
 
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(Qt.gray)
-        painter.drawEllipse(QPoint(cx, cy), r, r)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(Qt.gray)
+            painter.drawEllipse(QPoint(cx, cy), r, r)
 
-        painter.setBrush(Qt.white)
-        painter.setOpacity(0.25)
-        painter.drawEllipse(QPoint(cx - max(2, r // 3), cy - max(2, r // 3)), max(2, r // 3), max(2, r // 3))
-        painter.setOpacity(1.0)
+            painter.setBrush(Qt.white)
+            painter.setOpacity(0.25)
+            painter.drawEllipse(
+                QPoint(cx - max(2, r // 3), cy - max(2, r // 3)),
+                max(2, r // 3),
+                max(2, r // 3),
+            )
+            painter.setOpacity(1.0)
 
 
 # ---- Projectile Overlay ----
@@ -538,6 +584,7 @@ class ProjectileOverlay(QWidget):
 
         self._radius = max(2, int(radius))
         d = self._radius * 4 + 2
+        self._pix = _get_projectile_pixmap(d)
         self.resize(d, d)
 
         self._t0_ms = QDateTime.currentMSecsSinceEpoch()
@@ -582,18 +629,28 @@ class ProjectileOverlay(QWidget):
         painter.fillRect(self.rect(), Qt.transparent)
         painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
-        r = self._radius
-        cx = self.width() // 2
-        cy = self.height() // 2
+        # Draw the projectile image if available; otherwise fall back to a simple ball.
+        if getattr(self, "_pix", None) is not None and not self._pix.isNull():
+            x = (self.width() - self._pix.width()) // 2
+            y = (self.height() - self._pix.height()) // 2
+            painter.drawPixmap(int(x), int(y), self._pix)
+        else:
+            r = self._radius
+            cx = self.width() // 2
+            cy = self.height() // 2
 
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(Qt.gray)
-        painter.drawEllipse(QPoint(cx, cy), r, r)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(Qt.gray)
+            painter.drawEllipse(QPoint(cx, cy), r, r)
 
-        painter.setBrush(Qt.white)
-        painter.setOpacity(0.25)
-        painter.drawEllipse(QPoint(cx - max(2, r // 3), cy - max(2, r // 3)), max(2, r // 3), max(2, r // 3))
-        painter.setOpacity(1.0)
+            painter.setBrush(Qt.white)
+            painter.setOpacity(0.25)
+            painter.drawEllipse(
+                QPoint(cx - max(2, r // 3), cy - max(2, r // 3)),
+                max(2, r // 3),
+                max(2, r // 3),
+            )
+            painter.setOpacity(1.0)
 
 
 _active_cannonballs: list[CannonBallOverlay] = []
