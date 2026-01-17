@@ -13,4 +13,7 @@ site-packages/
 
 pyvenv.cfg
 
+db.json
+control_panel_settings.json
+network.py
 control_panel_settings.json
