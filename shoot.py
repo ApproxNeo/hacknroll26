@@ -1835,6 +1835,7 @@ def shoot_projectile_remote_arrive_left(
     land_nx: float = None,
     land_ny: float = None,
     entry_ny: float = 0.5,
+    color: QColor = None,
 ) -> str:
     """Remote projectile arriving from the left edge (left-to-right shooting).
 
@@ -1900,7 +1901,7 @@ def shoot_projectile_remote_arrive_left(
 
     def _spawn():
         try:
-            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_end)
+            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_end, color=color)
         except Exception as e:
             try:
                 print(f"Failed to start remote projectile: {e}")
@@ -1963,6 +1964,7 @@ def shoot_projectile_remote_arrive_right(
     land_nx: float = None,
     land_ny: float = None,
     entry_ny: float = 0.5,
+    color: QColor = None,
 ) -> str:
     """Remote projectile arriving from the right edge (right-to-left shooting).
 
@@ -2028,7 +2030,7 @@ def shoot_projectile_remote_arrive_right(
 
     def _spawn():
         try:
-            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_end)
+            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_end, color=color)
         except Exception as e:
             try:
                 print(f"Failed to start remote projectile: {e}")
@@ -2192,10 +2194,8 @@ class ControlPanel(QWidget):
         action = action_json.get("action")
 
         if action == "cannon":
-            # Apply remote color override if present.
+            # Parse remote color override if present (applies only to received projectile).
             color = _parse_color(action_json.get("projectile_color", ""))
-            if color is not None:
-                set_projectile_color(color)
 
         if action == "fire":
             x = action_json.get("x", 0)
@@ -2231,6 +2231,7 @@ class ControlPanel(QWidget):
                         start_delay_ms=delay_ms,
                         land_nx=land_nx,
                         land_ny=land_ny,
+                        color=color,
                     )
                     if err:
                         self._append_log(err)
@@ -2242,6 +2243,7 @@ class ControlPanel(QWidget):
                         start_delay_ms=delay_ms,
                         land_nx=land_nx,
                         land_ny=land_ny,
+                        color=color,
                     )
                     if err:
                         self._append_log(err)
