@@ -128,13 +128,13 @@ class ZeroConfP2P(QObject):
 
     SERVICE_TYPE = "_catclick._tcp.local."
 
-    def __init__(self, port: int, instance_name: str | None = None, parent=None):
+    def __init__(self, port: int, instance_name: str = None, parent=None):
         super().__init__(parent)
         self.port = int(port)
         self.instance_id = (instance_name or str(uuid.uuid4()))
-        self._zc: Zeroconf | None = None
-        self._browser: ServiceBrowser | None = None
-        self._info: ServiceInfo | None = None
+        self._zc: Zeroconf = None
+        self._browser: ServiceBrowser = None
+        self._info: ServiceInfo = None
         self._closed = False
 
     def start(self):
@@ -410,7 +410,7 @@ class GifOverlay(QWidget):
 _active_explosions: list[GifOverlay] = []
 
 
-def show_explosion(global_pos: QPoint) -> str | None:
+def show_explosion(global_pos: QPoint) -> str:
     gif_path = EXPLOSION_GIF
     if not gif_path.exists():
         return f"explode.gif not found at {gif_path}"
@@ -593,7 +593,7 @@ def get_lan_ip() -> str:
         s.close()
 
 
-def _first_ipv4(addresses: list[bytes]) -> str | None:
+def _first_ipv4(addresses: list[bytes]) -> str:
     for a in addresses or []:
         if len(a) == 4:
             return socket.inet_ntoa(a)
@@ -601,7 +601,7 @@ def _first_ipv4(addresses: list[bytes]) -> str | None:
 
 
 # Auto-connect client to the first discovered peer (if not already connected).
-_connected_to: tuple[str, int] | None = None
+_connected_to: tuple[str, int] = None
 
 # When the cat is clicked, send a message through the client and server.
 def on_cat_clicked(global_pos: QPoint):
