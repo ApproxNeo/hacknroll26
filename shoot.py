@@ -21,10 +21,11 @@ except Exception:
 # Debounce global hotkey shots (avoid OS key repeat spam).
 _LAST_HOTKEY_SHOT_MS = 0
 BASE_DIR = Path(__file__).resolve().parent
-EXPLOSION_GIF = BASE_DIR / "explode.gif"
-EXPLOSION_MP3 = BASE_DIR / "explode.mp3"
-PROJECTILE_PNG = BASE_DIR / "projectile.png"
-SETTINGS_PATH = BASE_DIR / "control_panel_settings.json"
+ASSET_DIR = BASE_DIR / "assets"
+EXPLOSION_GIF = ASSET_DIR / "anims/explode.gif"
+EXPLOSION_MP3 = ASSET_DIR / "sounds/explode.mp3"
+PROJECTILE_PNG = ASSET_DIR / "sprites/projectile.png"
+SETTINGS_PATH = ASSET_DIR / "control_panel_settings.json"
 
 # Cache the projectile pixmap (and scaled variants) so paint events are cheap.
 _PROJECTILE_PIX: QPixmap = None
