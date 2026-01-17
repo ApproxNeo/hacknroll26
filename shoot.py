@@ -1419,6 +1419,28 @@ _SFX_PLAYERS = []  # list[QMediaPlayer]
 _SFX_AUDIO = []    # list[QAudioOutput]
 _SFX_RR = 0
 
+# If QtMultimedia backend is broken on this system (common on some Linux/PipeWire setups),
+# disable it at runtime and fall back to OS playback.
+_QT_SFX_DISABLED = False
+_QT_SFX_DISABLE_REASON = ""
+
+
+def _disable_qt_sfx(reason: str):
+    global _QT_SFX_DISABLED, _QT_SFX_DISABLE_REASON
+    if _QT_SFX_DISABLED:
+        return
+    _QT_SFX_DISABLED = True
+    _QT_SFX_DISABLE_REASON = str(reason or "")
+    try:
+        # Best-effort: stop any players so we don't hang on a broken backend.
+        for p in list(_SFX_PLAYERS):
+            try:
+                p.stop()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 def _preload_explosion_sound() -> bool:
     """Preload explosion audio for low-latency playback (best-effort)."""
@@ -1440,6 +1462,15 @@ def _preload_explosion_sound() -> bool:
             p = QMediaPlayer()
             p.setAudioOutput(out)
             p.setSource(url)
+
+            # If the backend errors (e.g. PipeWire sync timeouts), disable Qt SFX and fall back.
+            try:
+                # PySide6: errorOccurred(QMediaPlayer.Error, str)
+                p.errorOccurred.connect(lambda err, err_str, _p=p: _disable_qt_sfx(f"QMediaPlayer error: {err_str}"))
+            except Exception:
+                # Some builds expose different signal shapes; ignore and rely on try/except in play.
+                pass
+
             _SFX_AUDIO.append(out)
             _SFX_PLAYERS.append(p)
 
@@ -1464,7 +1495,7 @@ def _play_explosion_sound():
         return
 
     # Low-latency path: QtMultimedia
-    if _preload_explosion_sound() and _SFX_PLAYERS:
+    if (not _QT_SFX_DISABLED) and _preload_explosion_sound() and _SFX_PLAYERS:
         try:
             # Round-robin: always play on the next player, restarting if currently playing.
             p = _SFX_PLAYERS[_SFX_RR % len(_SFX_PLAYERS)]
@@ -1479,9 +1510,9 @@ def _play_explosion_sound():
                 pass
             p.play()
             return
-        except Exception:
-            # If QtMultimedia fails at runtime, drop through to OS fallback.
-            pass
+        except Exception as e:
+            # If QtMultimedia fails at runtime, disable it and drop through to OS fallback.
+            _disable_qt_sfx(f"QtMultimedia play failed: {e}")
 
     # Fallback: spawn an OS player process (higher latency)
     try:
@@ -1510,7 +1541,7 @@ def _play_explosion_sound():
             )
         else:
             # Linux / others: try common players or xdg-open.
-            for cmd in (["paplay"], ["aplay"], ["ffplay", "-nodisp", "-autoexit"], ["xdg-open"]):
+            for cmd in (["paplay"], ["pw-play"], ["aplay"], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error"], ["xdg-open"]):
                 try:
                     proc = subprocess.Popen(
                         cmd + [str(EXPLOSION_MP3)],
