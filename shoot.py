@@ -3,6 +3,7 @@ import json
 import socket
 import threading
 import uuid
+import random
 import subprocess
 from pathlib import Path
 from PySide6.QtGui import QPainter, QPixmap, QMovie
@@ -1010,9 +1011,16 @@ def shoot_projectile_remote_arrive_left(
     g: float,
     *,
     start_delay_ms: int = None,
+    land_nx: float = None,
+    land_ny: float = None,
+    entry_ny: float = 0.5,
 ) -> str:
-    # On the remote (right) machine, start from the left edge and land where the physics dictates,
-    # based on the sender's cat origin (sx, sy).
+    """Remote projectile arriving from the left edge (left-to-right shooting).
+
+    If land_nx/land_ny are provided, the projectile will land at that normalized
+    location (randomized by the sender), instead of landing based on the sender's
+    cat origin.
+    """
     geo = QApplication.primaryScreen().availableGeometry()
 
     if vx <= 0.0:
@@ -1022,21 +1030,10 @@ def shoot_projectile_remote_arrive_left(
     x_exit = 1.05
     x_entry = -0.05
 
-    # Time from sender start until it fully exits (x=1.05).
+    # Time from sender start until it fully exits (x=1.05). Used for visual sync.
     t_exit = (x_exit - sx) / vx
     if t_exit < 0.0:
         t_exit = 0.0
-
-    # State at the moment it fully exits on the sender.
-    y_exit = sy + vy0 * t_exit + 0.5 * g * t_exit * t_exit
-    vy_exit = vy0 + g * t_exit
-
-    # Remote starts slightly offscreen to the left at the same state.
-    x0 = x_entry
-    y0 = y_exit
-
-    # Solve landing time back to the original start height sy.
-    t_land = _solve_landing_time(y0, vy_exit, g, sy)
 
     # Delay remote start so it visually syncs with the sender exiting the screen.
     if start_delay_ms is None:
@@ -1044,9 +1041,40 @@ def shoot_projectile_remote_arrive_left(
     else:
         start_delay_ms = max(0, int(start_delay_ms))
 
+    # Remote starts slightly offscreen to the left.
+    x0 = x_entry
+    y0 = float(entry_ny if entry_ny is not None else 0.5)
+
+    # If no explicit landing target is provided, keep old behavior (land back at sy).
+    if land_nx is None or land_ny is None:
+        # State at the moment it fully exits on the sender.
+        y_exit = sy + vy0 * t_exit + 0.5 * g * t_exit * t_exit
+        vy_exit = vy0 + g * t_exit
+
+        y0 = float(y_exit)
+        t_land = _solve_landing_time(y0, vy_exit, g, sy)
+        vy_start = float(vy_exit)
+    else:
+        # Clamp targets to sane bounds in normalized space.
+        try:
+            tx = float(land_nx)
+            ty = float(land_ny)
+        except Exception:
+            tx, ty = 0.5, 0.75
+        tx = max(0.05, min(0.95, tx))
+        ty = max(0.05, min(0.95, ty))
+
+        # Choose time-to-land based on horizontal travel.
+        t_land = (tx - x0) / vx
+        if t_land <= 0.05:
+            t_land = 0.05
+
+        # Solve for initial vertical velocity so y(t_land) = ty.
+        vy_start = (ty - y0 - 0.5 * g * t_land * t_land) / t_land
+
     def _spawn():
         try:
-            proj = ProjectileOverlay(geo, x0, y0, vx, vy_exit, g, t_land)
+            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_land)
         except Exception as e:
             try:
                 print(f"Failed to start remote projectile: {e}")
@@ -1100,8 +1128,16 @@ def shoot_projectile_remote_arrive_right(
     g: float,
     *,
     start_delay_ms: int = None,
+    land_nx: float = None,
+    land_ny: float = None,
+    entry_ny: float = 0.5,
 ) -> str:
-    """Remote projectile arriving from the right edge (right-to-left shooting)."""
+    """Remote projectile arriving from the right edge (right-to-left shooting).
+
+    If land_nx/land_ny are provided, the projectile will land at that normalized
+    location (randomized by the sender), instead of landing based on the sender's
+    cat origin.
+    """
     geo = QApplication.primaryScreen().availableGeometry()
 
     if vx >= 0.0:
@@ -1111,21 +1147,10 @@ def shoot_projectile_remote_arrive_right(
     x_exit = -0.05
     x_entry = 1.05
 
-    # Time from sender start until it fully exits (x=-0.05).
+    # Time from sender start until it fully exits (x=-0.05). Used for visual sync.
     t_exit = (x_exit - sx) / vx
     if t_exit < 0.0:
         t_exit = 0.0
-
-    # State at the moment it fully exits on the sender.
-    y_exit = sy + vy0 * t_exit + 0.5 * g * t_exit * t_exit
-    vy_exit = vy0 + g * t_exit
-
-    # Remote starts slightly offscreen to the right at the same state.
-    x0 = x_entry
-    y0 = y_exit
-
-    # Solve landing time back to the original start height sy.
-    t_land = _solve_landing_time(y0, vy_exit, g, sy)
 
     # Delay remote start so it visually syncs with the sender exiting the screen.
     if start_delay_ms is None:
@@ -1133,9 +1158,40 @@ def shoot_projectile_remote_arrive_right(
     else:
         start_delay_ms = max(0, int(start_delay_ms))
 
+    # Remote starts slightly offscreen to the right.
+    x0 = x_entry
+    y0 = float(entry_ny if entry_ny is not None else 0.5)
+
+    # If no explicit landing target is provided, keep old behavior (land back at sy).
+    if land_nx is None or land_ny is None:
+        # State at the moment it fully exits on the sender.
+        y_exit = sy + vy0 * t_exit + 0.5 * g * t_exit * t_exit
+        vy_exit = vy0 + g * t_exit
+
+        y0 = float(y_exit)
+        t_land = _solve_landing_time(y0, vy_exit, g, sy)
+        vy_start = float(vy_exit)
+    else:
+        # Clamp targets to sane bounds in normalized space.
+        try:
+            tx = float(land_nx)
+            ty = float(land_ny)
+        except Exception:
+            tx, ty = 0.5, 0.75
+        tx = max(0.05, min(0.95, tx))
+        ty = max(0.05, min(0.95, ty))
+
+        # Choose time-to-land based on horizontal travel.
+        t_land = (tx - x0) / vx  # vx is negative
+        if t_land <= 0.05:
+            t_land = 0.05
+
+        # Solve for initial vertical velocity so y(t_land) = ty.
+        vy_start = (ty - y0 - 0.5 * g * t_land * t_land) / t_land
+
     def _spawn():
         try:
-            proj = ProjectileOverlay(geo, x0, y0, vx, vy_exit, g, t_land)
+            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_land)
         except Exception as e:
             try:
                 print(f"Failed to start remote projectile: {e}")
@@ -1307,15 +1363,27 @@ class ControlPanel(QWidget):
 
                 delay_ms = action_json.get("delay_ms", None)
                 direction = action_json.get("direction", "left_to_right")
+                land_nx = action_json.get("land_nx", None)
+                land_ny = action_json.get("land_ny", None)
                 
                 if direction == "right_to_left":
-                    err = shoot_projectile_remote_arrive_right(sx, sy, vx, vy, g, start_delay_ms=delay_ms)
+                    err = shoot_projectile_remote_arrive_right(
+                        sx, sy, vx, vy, g,
+                        start_delay_ms=delay_ms,
+                        land_nx=land_nx,
+                        land_ny=land_ny,
+                    )
                     if err:
                         self._append_log(err)
                         return
                     self._append_log("Projectile received (right->left)")
                 else:
-                    err = shoot_projectile_remote_arrive_left(sx, sy, vx, vy, g, start_delay_ms=delay_ms)
+                    err = shoot_projectile_remote_arrive_left(
+                        sx, sy, vx, vy, g,
+                        start_delay_ms=delay_ms,
+                        land_nx=land_nx,
+                        land_ny=land_ny,
+                    )
                     if err:
                         self._append_log(err)
                         return
@@ -1430,8 +1498,21 @@ def on_cat_clicked(global_pos: QPoint):
         vx = -1.25  # Negative velocity for leftward motion
         x_exit = -0.05
         delay_ms = int(round(max(0.0, (x_exit - sx) / vx) * 1000.0))
-        
-        data = {"action": "cannon", "sx": sx, "sy": sy, "vx": vx, "vy": vy, "g": g, "delay_ms": delay_ms, "direction": "right_to_left"}
+
+        land_nx = random.uniform(0.2, 0.8)
+        land_ny = random.uniform(0.25, 0.85)
+        data = {
+            "action": "cannon",
+            "sx": sx,
+            "sy": sy,
+            "vx": vx,
+            "vy": vy,
+            "g": g,
+            "delay_ms": delay_ms,
+            "direction": "right_to_left",
+            "land_nx": land_nx,
+            "land_ny": land_ny,
+        }
         msg = json.dumps(data)
 
         # Local effect: start at the cat and exit the local screen to the left (no explosion).
@@ -1446,8 +1527,21 @@ def on_cat_clicked(global_pos: QPoint):
         vx = 1.25  # Positive velocity for rightward motion
         x_exit = 1.05
         delay_ms = int(round(max(0.0, (x_exit - sx) / vx) * 1000.0))
-        
-        data = {"action": "cannon", "sx": sx, "sy": sy, "vx": vx, "vy": vy, "g": g, "delay_ms": delay_ms, "direction": "left_to_right"}
+
+        land_nx = random.uniform(0.2, 0.8)
+        land_ny = random.uniform(0.25, 0.85)
+        data = {
+            "action": "cannon",
+            "sx": sx,
+            "sy": sy,
+            "vx": vx,
+            "vy": vy,
+            "g": g,
+            "delay_ms": delay_ms,
+            "direction": "left_to_right",
+            "land_nx": land_nx,
+            "land_ny": land_ny,
+        }
         msg = json.dumps(data)
 
         # Local effect: start at the cat and exit the local screen to the right (no explosion).
