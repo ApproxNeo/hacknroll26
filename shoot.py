@@ -1978,7 +1978,7 @@ def shoot_cannon_to(
     *,
     explode_on_land: bool = True,
     duration_ms: int = 900,
-    arc_height: int = 200,
+    arc_height: int = 220,
 ) -> str:
     # Choose a start position: bottom-left-ish of the screen containing the target.
     screen = QApplication.screenAt(target_global_pos) or QApplication.primaryScreen()
@@ -2275,11 +2275,11 @@ def on_cat_clicked(global_pos: QPoint):
 
     # Randomize arc per shot (shared with peer via payload).
     # g: normalized units/s^2 (positive, y increases downward)
-    g = random.uniform(2.4, 3.8)
+    g = random.uniform(1.9, 3.2)
 
     # Peak height as a fraction of screen height (higher => larger arc).
     # Increased range to make the arc noticeably higher.
-    peak_h = random.uniform(0.32, 0.52)
+    peak_h = random.uniform(0.38, 0.62)
 
     # Initial vertical velocity that yields the chosen peak height.
     vy = -math.sqrt(max(0.0, 2.0 * g * peak_h))
