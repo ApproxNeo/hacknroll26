@@ -1,57 +1,94 @@
-import asyncio
-import logging
-from bless import (
-    BlessServer,
-    BlessGATTCharacteristic,
-    GATTCharacteristicProperties,
-    GATTAttributePermissions
-)
+# mac_peripheral.py
+from Foundation import NSObject, NSRunLoop, NSDate, NSData
+import CoreBluetooth as CB
 
-# --- CONFIGURATION ---
-SERVICE_UUID = "A07498CA-AD5B-474E-940D-16F1FBE7E8CD"
-CHAR_UUID = "51FF12BB-3ED8-46E5-B4F9-D64E2FEC021B"
-SERVER_NAME = "Python_BLE_Chat"
+SERVICE_UUID = "12345678-1234-5678-1234-56789ABCDEF0"
+CHAR_UUID    = "12345678-1234-5678-1234-56789ABCDEF1"
+DEVICE_NAME  = "BLEChat"
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(SERVER_NAME)
+def to_nsdata(b: bytes) -> NSData:
+    return NSData.dataWithBytes_length_(b, len(b))
 
-def write_request_callback(characteristic: BlessGATTCharacteristic, value: bytearray, **kwargs):
-    try:
-        message = value.decode('utf-8')
-        print(f"\n[📨 RECEIVED MESSAGE]: {message}")
-    except Exception as e:
-        print(f"\n[!] Received non-text data: {value}")
+class PeripheralDelegate(NSObject):
+    def init(self):
+        # self = super().init()
+        if self is None:
+            return None
+        self.pm = None
+        self.char = None
+        self.last_value = b""
+        return self
 
-def read_request_callback(characteristic: BlessGATTCharacteristic, **kwargs):
-    # If the client tries to read, we must return bytes
-    return b"Hello from Server"
+    def peripheralManagerDidUpdateState_(self, peripheral):
+        # 5 == poweredOn (CBManagerStatePoweredOn); avoids importing enum symbols
+        if int(peripheral.state()) != 5:
+            print("Bluetooth not powered on (state=%s)" % peripheral.state())
+            return
 
-async def run_server():
-    server = BlessServer(name=SERVER_NAME)
-    
-    # We need to handle reads manually now that value is None
-    server.read_request_func = read_request_callback
-    server.write_request_func = write_request_callback
+        self.pm = peripheral
 
-    await server.add_new_service(SERVICE_UUID)
+        self.char = CB.CBMutableCharacteristic.alloc().initWithType_properties_value_permissions_(
+            CB.CBUUID.UUIDWithString_(CHAR_UUID),
+            (CB.CBCharacteristicPropertyRead |
+             CB.CBCharacteristicPropertyWrite |
+             CB.CBCharacteristicPropertyNotify),
+            None,
+            (CB.CBAttributePermissionsReadable |
+             CB.CBAttributePermissionsWriteable),
+        )
 
-    await server.add_new_characteristic(
-        SERVICE_UUID,
-        CHAR_UUID,
-        properties=GATTCharacteristicProperties.write | GATTCharacteristicProperties.read,
-        permissions=GATTAttributePermissions.writeable | GATTAttributePermissions.readable,
-        value=None # Fixed: Must be None for writable characteristics on macOS
-    )
+        svc = CB.CBMutableService.alloc().initWithType_primary_(
+            CB.CBUUID.UUIDWithString_(SERVICE_UUID),
+            True
+        )
+        svc.setCharacteristics_([self.char])
 
-    print(f"Starting BLE Server: {SERVER_NAME}...")
-    await server.start()
-    print(f"Running... Advertising Service: {SERVICE_UUID}")
-    
+        self.pm.addService_(svc)
+
+    def peripheralManager_didAddService_error_(self, peripheral, service, error):
+        if error is not None:
+            print("addService error:", error)
+            return
+
+        adv = {
+            CB.CBAdvertisementDataLocalNameKey: DEVICE_NAME,
+            CB.CBAdvertisementDataServiceUUIDsKey: [CB.CBUUID.UUIDWithString_(SERVICE_UUID)],
+        }
+        peripheral.startAdvertising_(adv)
+        print("Advertising as", DEVICE_NAME)
+
+    def peripheralManagerDidStartAdvertising_error_(self, peripheral, error):
+        if error is not None:
+            print("Advertising error:", error)
+
+    def peripheralManager_didReceiveWriteRequests_(self, peripheral, requests):
+        for req in requests:
+            data = req.value()
+            if data is None:
+                continue
+            b = bytes(data)
+            self.last_value = b
+            print("[RX from client]", b.decode("utf-8", errors="replace"))
+            peripheral.respondToRequest_withResult_(req, CB.CBATTErrorSuccess)
+
+        peripheral.updateValue_forCharacteristic_onSubscribedCentrals_(
+            to_nsdata(self.last_value),
+            self.char,
+            None
+        )
+
+    def peripheralManager_didReceiveReadRequest_(self, peripheral, request):
+        request.setValue_(to_nsdata(self.last_value))
+        peripheral.respondToRequest_withResult_(request, CB.CBATTErrorSuccess)
+
+def main():
+    delegate = PeripheralDelegate.alloc().init()
+    pm = CB.CBPeripheralManager.alloc().initWithDelegate_queue_(delegate, None)
+    delegate.pm = pm
+
+    rl = NSRunLoop.currentRunLoop()
     while True:
-        await asyncio.sleep(1)
+        rl.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.2))
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(run_server())
-    except KeyboardInterrupt:
-        print("Stopping server...")
+    main()
