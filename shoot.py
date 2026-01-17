@@ -475,7 +475,7 @@ class CannonBallOverlay(QWidget):
         self._arc = int(arc_height)
 
         # Widget size is just big enough to draw the projectile.
-        d = self._radius * 4 + 2
+        d = self._radius * 6 + 2
         self._pix = _get_projectile_pixmap(d)
         self.resize(d, d)
 
