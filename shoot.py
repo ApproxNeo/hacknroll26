@@ -1024,7 +1024,7 @@ def shoot_cannon_to(
 
 
 class ControlPanel(QWidget):
-    def __init__(self, overlay: SpriteOverlay, server: MessageServer, client: MessageClient, initial_fps: int = 12):
+    def __init__(self, overlay: SpriteOverlay, server: MessageServer, client: MessageClient):
         super().__init__()
         self.overlay = overlay
         self.server = server
@@ -1058,17 +1058,6 @@ class ControlPanel(QWidget):
         self.chk_direction.toggled.connect(self._on_direction_changed)
         root.addWidget(self.chk_direction)
 
-        # FPS
-        fps_row = QHBoxLayout()
-        fps_row.addWidget(QLabel("FPS"))
-        self.spin_fps = QSpinBox()
-        self.spin_fps.setRange(1, 60)
-        self.spin_fps.setValue(int(initial_fps))
-        self.spin_fps.valueChanged.connect(self.overlay.set_fps)
-        fps_row.addWidget(self.spin_fps)
-        fps_row.addStretch(1)
-        root.addLayout(fps_row)
-
         # Speed
         speed_row = QHBoxLayout()
         speed_row.addWidget(QLabel("Speed"))
@@ -1080,31 +1069,6 @@ class ControlPanel(QWidget):
         speed_row.addWidget(self.sld_speed)
         root.addLayout(speed_row)
 
-        # Networking
-        net_title = QLabel("Networking (TCP)")
-        root.addWidget(net_title)
-
-        net_row = QHBoxLayout()
-        net_row.addWidget(QLabel("Host"))
-        self.txt_host = QLineEdit("127.0.0.1")
-        net_row.addWidget(self.txt_host)
-
-        net_row.addWidget(QLabel("Port"))
-        self.spin_port = QSpinBox()
-        self.spin_port.setRange(1, 65535)
-        self.spin_port.setValue(50505)
-        net_row.addWidget(self.spin_port)
-        root.addLayout(net_row)
-
-        net_btn_row = QHBoxLayout()
-        self.btn_start_server = QPushButton("Start server")
-        self.btn_connect_client = QPushButton("Connect client")
-        self.btn_disconnect_client = QPushButton("Disconnect client")
-        net_btn_row.addWidget(self.btn_start_server)
-        net_btn_row.addWidget(self.btn_connect_client)
-        net_btn_row.addWidget(self.btn_disconnect_client)
-        root.addLayout(net_btn_row)
-
         self.lbl_net_status = QLabel("-")
         root.addWidget(self.lbl_net_status)
 
@@ -1112,13 +1076,6 @@ class ControlPanel(QWidget):
         self.txt_log.setReadOnly(True)
         self.txt_log.setMinimumHeight(140)
         root.addWidget(self.txt_log)
-
-        def _host_port():
-            return self.txt_host.text().strip() or "127.0.0.1", int(self.spin_port.value())
-
-        self.btn_start_server.clicked.connect(lambda: self.server.start(*_host_port()))
-        self.btn_connect_client.clicked.connect(lambda: self.client.connect_to(*_host_port()))
-        self.btn_disconnect_client.clicked.connect(self.client.disconnect)
 
         self.server.status_changed.connect(self._append_log)
         self.client.status_changed.connect(self._append_log)
@@ -1139,7 +1096,6 @@ class ControlPanel(QWidget):
         root.addLayout(btn_row)
 
         # Apply initial settings
-        self.overlay.set_fps(self.spin_fps.value())
         self.overlay.set_speed(self.sld_speed.value())
         self.overlay.set_click_through(self.chk_clickthrough.isChecked())
 
@@ -1337,7 +1293,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     frames = load_frames("frames")
-    w = SpriteOverlay(frames, fps=12)
+    w = SpriteOverlay(frames, fps=60)
 
     w.move(200, 200)
     w.show()
@@ -1365,7 +1321,7 @@ if __name__ == "__main__":
 
     w.clicked.connect(on_cat_clicked)
 
-    panel = ControlPanel(w, server, client, initial_fps=12)
+    panel = ControlPanel(w, server, client)
     panel.show()
 
     zc.status_changed.connect(panel._append_log)
