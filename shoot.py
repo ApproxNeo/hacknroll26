@@ -8,7 +8,7 @@ from PySide6.QtGui import QPainter, QPixmap, QMovie
 BASE_DIR = Path(__file__).resolve().parent
 EXPLOSION_GIF = BASE_DIR / "explode.gif"
 
-from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject, QDateTime, QSize
+from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject, QDateTime, QSize, QThread
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox, QLineEdit, QTextEdit
 from PySide6.QtNetwork import QTcpServer, QTcpSocket, QHostAddress
 
@@ -497,7 +497,109 @@ class CannonBallOverlay(QWidget):
         painter.setOpacity(1.0)
 
 
+# ---- Projectile Overlay ----
+
+class ProjectileOverlay(QWidget):
+    finished = Signal(QPoint)  # emits finish position (global)
+
+    def __init__(
+        self,
+        geo,
+        x0: float,
+        y0: float,
+        vx: float,
+        vy: float,
+        g: float,
+        t_end: float,
+        *,
+        radius: int = 10,
+    ):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint |
+            Qt.WindowDoesNotAcceptFocus |
+            Qt.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.NoFocus)
+
+        self._geo = geo
+        self._x0 = float(x0)
+        self._y0 = float(y0)
+        self._vx = float(vx)
+        self._vy = float(vy)
+        self._g = float(g)
+        self._t_end = max(0.0, float(t_end))
+
+        self._radius = max(2, int(radius))
+        d = self._radius * 4 + 2
+        self.resize(d, d)
+
+        self._t0_ms = QDateTime.currentMSecsSinceEpoch()
+        self._set_center(self._pos_at(0.0))
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(16)
+
+    def _pos_at(self, t: float) -> QPoint:
+        # Normalized projectile motion.
+        x = self._x0 + self._vx * t
+        y = self._y0 + self._vy * t + 0.5 * self._g * t * t
+
+        # Map normalized coords to pixels in this screen's available geometry.
+        px = self._geo.left() + int(round(x * self._geo.width()))
+        py = self._geo.top() + int(round(y * self._geo.height()))
+        return QPoint(int(px), int(py))
+
+    def _set_center(self, p: QPoint):
+        self.move(int(p.x() - self.width() // 2), int(p.y() - self.height() // 2))
+
+    def _tick(self):
+        now = QDateTime.currentMSecsSinceEpoch()
+        t = (now - self._t0_ms) / 1000.0
+        if t >= self._t_end:
+            self._timer.stop()
+            end_pos = self._pos_at(self._t_end)
+            self._set_center(end_pos)
+            self.finished.emit(end_pos)
+            self.close()
+            self.deleteLater()
+            return
+
+        self._set_center(self._pos_at(t))
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+        r = self._radius
+        cx = self.width() // 2
+        cy = self.height() // 2
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(Qt.gray)
+        painter.drawEllipse(QPoint(cx, cy), r, r)
+
+        painter.setBrush(Qt.white)
+        painter.setOpacity(0.25)
+        painter.drawEllipse(QPoint(cx - max(2, r // 3), cy - max(2, r // 3)), max(2, r // 3), max(2, r // 3))
+        painter.setOpacity(1.0)
+
+
 _active_cannonballs: list[CannonBallOverlay] = []
+
+
+_active_projectiles: list[ProjectileOverlay] = []
 
 
 _active_explosions: list[GifOverlay] = []
@@ -625,6 +727,96 @@ def _offscreen_start_towards_target(target: QPoint, vx: float, vy: float, *, mar
     x0 -= ux * margin
     y0 -= uy * margin
     return QPoint(int(round(x0)), int(round(y0)))
+
+
+# ---- Projectile helpers ----
+
+def _screen_geo_for_pos(pos: QPoint):
+    screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
+    return screen.availableGeometry() if screen else QApplication.primaryScreen().availableGeometry()
+
+
+def _solve_landing_time(y0: float, vy: float, g: float, y_land: float) -> float:
+    # Solve: y0 + vy*t + 0.5*g*t^2 = y_land
+    # => 0.5*g*t^2 + vy*t + (y0 - y_land) = 0
+    import math
+    a = 0.5 * g
+    b = vy
+    c = (y0 - y_land)
+    if abs(a) < 1e-9:
+        if abs(b) < 1e-9:
+            return 0.0
+        t = -c / b
+        return max(0.0, t)
+
+    disc = b * b - 4.0 * a * c
+    if disc < 0.0:
+        return 0.0
+    s = math.sqrt(disc)
+    t1 = (-b - s) / (2.0 * a)
+    t2 = (-b + s) / (2.0 * a)
+    t = max(t1, t2)
+    return max(0.0, t)
+
+
+def shoot_projectile_local_exit_right(start_global_pos: QPoint, vx: float, vy: float, g: float) -> str:
+    geo = _screen_geo_for_pos(start_global_pos)
+    sx, sy = _norm_point(start_global_pos)
+
+    # Stop slightly beyond the right edge so it visually exits.
+    x_end = 1.05
+    if vx <= 0.0:
+        return "Projectile vx must be > 0"
+
+    t_end = (x_end - sx) / vx
+    if t_end <= 0.0:
+        return "Projectile already past right edge"
+
+    try:
+        proj = ProjectileOverlay(geo, sx, sy, vx, vy, g, t_end)
+    except Exception as e:
+        return f"Failed to start projectile: {e}"
+
+    _active_projectiles.append(proj)
+    proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
+    proj.show()
+    return None
+
+
+def shoot_projectile_remote_arrive_left(sx: float, sy: float, vx: float, vy0: float, g: float) -> str:
+    # On the remote (right) machine, start from the left edge and land where the physics dictates,
+    # based on the sender's cat origin (sx, sy).
+    geo = QApplication.primaryScreen().availableGeometry()
+
+    if vx <= 0.0:
+        return "Projectile vx must be > 0"
+
+    # Time to cross from sender's x=sx to the sender's right edge (x=1.0).
+    t_cross = (1.0 - sx) / vx
+    if t_cross < 0.0:
+        t_cross = 0.0
+
+    # State at boundary crossing.
+    y_cross = sy + vy0 * t_cross + 0.5 * g * t_cross * t_cross
+    vy_cross = vy0 + g * t_cross
+
+    # Start slightly offscreen to the left so it visibly enters.
+    x0 = -0.05
+    y0 = y_cross
+
+    # Solve landing time back to the original start height sy.
+    t_land = _solve_landing_time(y0, vy_cross, g, sy)
+
+    try:
+        proj = ProjectileOverlay(geo, x0, y0, vx, vy_cross, g, t_land)
+    except Exception as e:
+        return f"Failed to start remote projectile: {e}"
+
+    _active_projectiles.append(proj)
+    proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
+    proj.finished.connect(lambda p: show_explosion(p))
+    proj.show()
+    return None
 
 
 def shoot_cannon_to(
@@ -791,7 +983,27 @@ class ControlPanel(QWidget):
             return
 
         if action == "cannon":
-            # Prefer normalized coordinates so different screen sizes still work.
+            # New mode: endpoint is determined by the projectile arc from the sender's cat origin.
+            if "sx" in action_json and "sy" in action_json:
+                try:
+                    sx = float(action_json.get("sx"))
+                    sy = float(action_json.get("sy"))
+                    vx = float(action_json.get("vx"))
+                    vy = float(action_json.get("vy"))
+                    g = float(action_json.get("g"))
+                except Exception as e:
+                    self._append_log(f"Invalid cannon payload: {e}")
+                    return
+
+                err = shoot_projectile_remote_arrive_left(sx, sy, vx, vy, g)
+                if err:
+                    self._append_log(err)
+                    return
+
+                self._append_log("Projectile received (left->right)")
+                return
+
+            # Backward compatibility: old target-based cannon.
             if "nx" in action_json and "ny" in action_json:
                 try:
                     nx = float(action_json.get("nx", 0.5))
@@ -804,21 +1016,7 @@ class ControlPanel(QWidget):
                 y = action_json.get("y", 0)
                 target = QPoint(int(x), int(y))
 
-            # If direction is provided, start just offscreen (behind the target) so it "arrives" cleanly.
-            vx = action_json.get("vx", None)
-            vy = action_json.get("vy", None)
-            start = None
-            if vx is not None and vy is not None:
-                try:
-                    vx = float(vx)
-                    vy = float(vy)
-                    back_step_px = 220
-                    behind = QPoint(int(target.x() - vx * back_step_px), int(target.y() - vy * back_step_px))
-                    start = _extend_line_offscreen(target, behind)
-                except Exception:
-                    start = None
-
-            err = shoot_cannon_to(target, start_global_pos=start, explode_on_land=True)
+            err = shoot_cannon_to(target, explode_on_land=True)
             if err:
                 self._append_log(err)
                 return
@@ -877,23 +1075,33 @@ _connected_to: tuple[str, int] = None
 
 
 # When the cat is clicked, assume THIS machine is on the LEFT and the peer is on the RIGHT.
-# The cannonball always travels left -> right: exits this screen to the right, then arrives
-# from the left edge and lands on the other screen.
+# The projectile always travels left -> right.
+# The endpoint on the remote is NOT the click position; it is determined by the natural arc
+# from the cat's origin.
 def on_cat_clicked(global_pos: QPoint):
-    # Target (where the remote will see it land).
-    nx, ny = _norm_point(global_pos)
+    # Sender cat origin in normalized coordinates.
+    sx, sy = _norm_point(global_pos)
 
-    # Force direction to left -> right.
-    vx, vy = 1.0, 0.0
+    # Tuned constants in normalized-units-per-second.
+    # These produce a stable, "natural" arc that crosses into the remote screen.
+    g = 2.5
+    vx = 1.25
 
-    data = {"action": "cannon", "nx": nx, "ny": ny, "vx": vx, "vy": vy}
+    # Choose peak height as a fraction of screen height.
+    peak_h = 0.25
+    import math
+    vy = -math.sqrt(max(0.0, 2.0 * g * peak_h))
+
+    data = {"action": "cannon", "sx": sx, "sy": sy, "vx": vx, "vy": vy, "g": g}
     msg = json.dumps(data)
 
     # Local effect: start at the cat and exit the local screen to the right (no explosion).
-    step_px = 240
-    through = QPoint(int(global_pos.x() + vx * step_px), int(global_pos.y() + vy * step_px))
-    offscreen_end = _extend_line_offscreen(global_pos, through)
-    shoot_cannon_to(offscreen_end, start_global_pos=global_pos, explode_on_land=False)
+    err = shoot_projectile_local_exit_right(global_pos, vx, vy, g)
+    if err:
+        try:
+            panel._append_log(err)
+        except Exception:
+            pass
 
     # Send to peers
     server.broadcast(msg)
