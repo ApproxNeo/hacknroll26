@@ -49,9 +49,18 @@ def _get_projectile_pixmap(target_size: int) -> QPixmap:
     _PROJECTILE_SCALED[target_size] = scaled
     return scaled
 
-from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject, QDateTime, QSize, QThread
+from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject, QDateTime, QSize, QThread, QUrl
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox, QLineEdit, QTextEdit
 from PySide6.QtNetwork import QTcpServer, QTcpSocket, QHostAddress
+
+# QtMultimedia gives much lower latency than spawning OS player processes.
+try:
+    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+    _QT_AUDIO_AVAILABLE = True
+except Exception:
+    QMediaPlayer = None  # type: ignore
+    QAudioOutput = None  # type: ignore
+    _QT_AUDIO_AVAILABLE = False
 
 from zeroconf import Zeroconf, ServiceInfo, ServiceBrowser, ServiceStateChange
 
@@ -687,23 +696,83 @@ def _drop_oldest(overlays: list):
     except Exception:
         pass
 
+
 # ---- Explosion sound ----
-# Keep a small pool of processes so multiple explosions can overlap without cutting each other off.
+# Prefer QtMultimedia (low-latency) and fall back to OS tools if unavailable.
+
 _EXPLODE_PROCS: list[subprocess.Popen] = []
 _EXPLODE_MAX_SIMULTANEOUS = 4
 
+_SFX_READY = False
+_SFX_PLAYERS = []  # list[QMediaPlayer]
+_SFX_AUDIO = []    # list[QAudioOutput]
+_SFX_RR = 0
+
+
+def _preload_explosion_sound() -> bool:
+    """Preload explosion audio for low-latency playback (best-effort)."""
+    global _SFX_READY, _SFX_PLAYERS, _SFX_AUDIO
+
+    if _SFX_READY:
+        return True
+    if not EXPLOSION_MP3.exists():
+        return False
+    if not _QT_AUDIO_AVAILABLE:
+        return False
+
+    try:
+        url = QUrl.fromLocalFile(str(EXPLOSION_MP3))
+        # Pre-create a small pool so multiple explosions can overlap.
+        for _ in range(_EXPLODE_MAX_SIMULTANEOUS):
+            out = QAudioOutput()
+            out.setVolume(0.9)
+            p = QMediaPlayer()
+            p.setAudioOutput(out)
+            p.setSource(url)
+            _SFX_AUDIO.append(out)
+            _SFX_PLAYERS.append(p)
+
+        _SFX_READY = True
+        return True
+    except Exception:
+        _SFX_PLAYERS = []
+        _SFX_AUDIO = []
+        _SFX_READY = False
+        return False
+
 
 def _play_explosion_sound():
-    """Best-effort, non-blocking playback of explode.mp3 using OS tools.
+    """Best-effort, non-blocking playback of explode.mp3.
 
-    Allows overlapping plays (multiple explosions close together) by spawning a new
-    player process each time, keeping a small capped pool.
+    Uses QtMultimedia when available (lower startup latency than spawning a process).
+    Falls back to OS tools if QtMultimedia isn't available.
     """
-    global _EXPLODE_PROCS
+    global _EXPLODE_PROCS, _SFX_RR
 
     if not EXPLOSION_MP3.exists():
         return
 
+    # Low-latency path: QtMultimedia
+    if _preload_explosion_sound() and _SFX_PLAYERS:
+        try:
+            # Round-robin: always play on the next player, restarting if currently playing.
+            p = _SFX_PLAYERS[_SFX_RR % len(_SFX_PLAYERS)]
+            _SFX_RR = (_SFX_RR + 1) % len(_SFX_PLAYERS)
+            try:
+                p.stop()
+            except Exception:
+                pass
+            try:
+                p.setPosition(0)
+            except Exception:
+                pass
+            p.play()
+            return
+        except Exception:
+            # If QtMultimedia fails at runtime, drop through to OS fallback.
+            pass
+
+    # Fallback: spawn an OS player process (higher latency)
     try:
         # Prune finished processes.
         _EXPLODE_PROCS = [p for p in _EXPLODE_PROCS if p is not None and p.poll() is None]
@@ -1395,6 +1464,9 @@ def on_cat_clicked(global_pos: QPoint):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    # Preload explosion audio to avoid first-play lag.
+    _preload_explosion_sound()
 
     frames = load_frames("frames")
     w = SpriteOverlay(frames, fps=60)
