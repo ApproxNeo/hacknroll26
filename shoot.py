@@ -13,6 +13,9 @@ PROJECTILE_PNG = BASE_DIR / "projectile.png"
 _PROJECTILE_PIX: QPixmap = None
 _PROJECTILE_SCALED: dict[int, QPixmap] = {}
 
+# Shooting direction configuration
+_SHOOT_DIRECTION: str = "left_to_right"  # "left_to_right" or "right_to_left"
+
 
 def _get_projectile_pixmap(target_size: int) -> QPixmap:
     """Load projectile.png if present and return a scaled pixmap sized ~target_size."""
@@ -901,6 +904,91 @@ def shoot_projectile_remote_arrive_left(
     return None
 
 
+def shoot_projectile_local_exit_left(start_global_pos: QPoint, vx: float, vy: float, g: float) -> str:
+    """Shoot projectile from right to left, exiting left edge."""
+    geo = _screen_geo_for_pos(start_global_pos)
+    sx, sy = _norm_point(start_global_pos)
+
+    # Stop slightly beyond the left edge so it visually exits.
+    x_end = -0.05  # local: travel slightly past left edge before disappearing
+    if vx >= 0.0:
+        return "Projectile vx must be < 0 for right-to-left shooting"
+
+    t_end = (x_end - sx) / vx
+    if t_end <= 0.0:
+        return "Projectile already past left edge"
+
+    try:
+        proj = ProjectileOverlay(geo, sx, sy, vx, vy, g, t_end)
+    except Exception as e:
+        return f"Failed to start projectile: {e}"
+
+    _active_projectiles.append(proj)
+    proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
+    proj.show()
+    return None
+
+
+def shoot_projectile_remote_arrive_right(
+    sx: float,
+    sy: float,
+    vx: float,
+    vy0: float,
+    g: float,
+    *,
+    start_delay_ms: int = None,
+) -> str:
+    """Remote projectile arriving from the right edge (right-to-left shooting)."""
+    geo = QApplication.primaryScreen().availableGeometry()
+
+    if vx >= 0.0:
+        return "Projectile vx must be < 0 for right-to-left shooting"
+
+    # Match the sender: local projectile runs until x=-0.05 then disappears.
+    x_exit = -0.05
+    x_entry = 1.05
+
+    # Time from sender start until it fully exits (x=-0.05).
+    t_exit = (x_exit - sx) / vx
+    if t_exit < 0.0:
+        t_exit = 0.0
+
+    # State at the moment it fully exits on the sender.
+    y_exit = sy + vy0 * t_exit + 0.5 * g * t_exit * t_exit
+    vy_exit = vy0 + g * t_exit
+
+    # Remote starts slightly offscreen to the right at the same state.
+    x0 = x_entry
+    y0 = y_exit
+
+    # Solve landing time back to the original start height sy.
+    t_land = _solve_landing_time(y0, vy_exit, g, sy)
+
+    # Delay remote start so it visually syncs with the sender exiting the screen.
+    if start_delay_ms is None:
+        start_delay_ms = int(round(t_exit * 1000.0))
+    else:
+        start_delay_ms = max(0, int(start_delay_ms))
+
+    def _spawn():
+        try:
+            proj = ProjectileOverlay(geo, x0, y0, vx, vy_exit, g, t_land)
+        except Exception as e:
+            try:
+                print(f"Failed to start remote projectile: {e}")
+            except Exception:
+                pass
+            return
+
+        _active_projectiles.append(proj)
+        proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
+        proj.finished.connect(lambda p: show_explosion(p))
+        proj.show()
+
+    QTimer.singleShot(int(start_delay_ms), _spawn)
+    return None
+
+
 def shoot_cannon_to(
     target_global_pos: QPoint,
     start_global_pos: QPoint = None,
@@ -963,6 +1051,12 @@ class ControlPanel(QWidget):
         self.chk_clickthrough.setChecked(True)
         self.chk_clickthrough.toggled.connect(self.overlay.set_click_through)
         root.addWidget(self.chk_clickthrough)
+
+        # Shooting direction
+        self.chk_direction = QCheckBox("Shoot right-to-left (unchecked: left-to-right)")
+        self.chk_direction.setChecked(False)
+        self.chk_direction.toggled.connect(self._on_direction_changed)
+        root.addWidget(self.chk_direction)
 
         # FPS
         fps_row = QHBoxLayout()
@@ -1083,12 +1177,20 @@ class ControlPanel(QWidget):
                     return
 
                 delay_ms = action_json.get("delay_ms", None)
-                err = shoot_projectile_remote_arrive_left(sx, sy, vx, vy, g, start_delay_ms=delay_ms)
-                if err:
-                    self._append_log(err)
-                    return
-
-                self._append_log("Projectile received (left->right)")
+                direction = action_json.get("direction", "left_to_right")
+                
+                if direction == "right_to_left":
+                    err = shoot_projectile_remote_arrive_right(sx, sy, vx, vy, g, start_delay_ms=delay_ms)
+                    if err:
+                        self._append_log(err)
+                        return
+                    self._append_log("Projectile received (right->left)")
+                else:
+                    err = shoot_projectile_remote_arrive_left(sx, sy, vx, vy, g, start_delay_ms=delay_ms)
+                    if err:
+                        self._append_log(err)
+                        return
+                    self._append_log("Projectile received (left->right)")
                 return
 
             # Backward compatibility: old target-based cannon.
@@ -1123,6 +1225,11 @@ class ControlPanel(QWidget):
             self.overlay.show()
         else:
             self.overlay.hide()
+
+    def _on_direction_changed(self, right_to_left: bool):
+        global _SHOOT_DIRECTION
+        _SHOOT_DIRECTION = "right_to_left" if right_to_left else "left_to_right"
+        self._append_log(f"Shooting direction: {_SHOOT_DIRECTION}")
 
     def _shoot(self):
         # Fire from the sprite overlay's current center position.
@@ -1171,38 +1278,56 @@ def _first_ipv4(addresses: list[bytes]) -> str:
 _connected_to: tuple[str, int] = None
 
 
-# When the cat is clicked, assume THIS machine is on the LEFT and the peer is on the RIGHT.
-# The projectile always travels left -> right.
+# When the cat is clicked, the projectile direction is determined by _SHOOT_DIRECTION.
 # The endpoint on the remote is NOT the click position; it is determined by the natural arc
 # from the cat's origin.
 def on_cat_clicked(global_pos: QPoint):
+    global _SHOOT_DIRECTION
+    
     # Sender cat origin in normalized coordinates.
     sx, sy = _norm_point(global_pos)
 
     # Tuned constants in normalized-units-per-second.
     # These produce a stable, "natural" arc that crosses into the remote screen.
     g = 2.5
-    vx = 1.25
-
+    
     # Choose peak height as a fraction of screen height.
     peak_h = 0.25
     import math
     vy = -math.sqrt(max(0.0, 2.0 * g * peak_h))
 
-    # Delay for the remote start: match the time until this projectile fully exits the local screen.
-    x_exit = 1.05
-    delay_ms = int(round(max(0.0, (x_exit - sx) / vx) * 1000.0))
+    if _SHOOT_DIRECTION == "right_to_left":
+        # Shooting from right to left
+        vx = -1.25  # Negative velocity for leftward motion
+        x_exit = -0.05
+        delay_ms = int(round(max(0.0, (x_exit - sx) / vx) * 1000.0))
+        
+        data = {"action": "cannon", "sx": sx, "sy": sy, "vx": vx, "vy": vy, "g": g, "delay_ms": delay_ms, "direction": "right_to_left"}
+        msg = json.dumps(data)
 
-    data = {"action": "cannon", "sx": sx, "sy": sy, "vx": vx, "vy": vy, "g": g, "delay_ms": delay_ms}
-    msg = json.dumps(data)
+        # Local effect: start at the cat and exit the local screen to the left (no explosion).
+        err = shoot_projectile_local_exit_left(global_pos, vx, vy, g)
+        if err:
+            try:
+                panel._append_log(err)
+            except Exception:
+                pass
+    else:
+        # Default: shooting from left to right
+        vx = 1.25  # Positive velocity for rightward motion
+        x_exit = 1.05
+        delay_ms = int(round(max(0.0, (x_exit - sx) / vx) * 1000.0))
+        
+        data = {"action": "cannon", "sx": sx, "sy": sy, "vx": vx, "vy": vy, "g": g, "delay_ms": delay_ms, "direction": "left_to_right"}
+        msg = json.dumps(data)
 
-    # Local effect: start at the cat and exit the local screen to the right (no explosion).
-    err = shoot_projectile_local_exit_right(global_pos, vx, vy, g)
-    if err:
-        try:
-            panel._append_log(err)
-        except Exception:
-            pass
+        # Local effect: start at the cat and exit the local screen to the right (no explosion).
+        err = shoot_projectile_local_exit_right(global_pos, vx, vy, g)
+        if err:
+            try:
+                panel._append_log(err)
+            except Exception:
+                pass
 
     # Send to peers
     server.broadcast(msg)
