@@ -466,7 +466,7 @@ class CatOverlay(QWidget):
         
         self.speed_mag = 5
         self.click_through = True  # NEW: Always click-through
-        self.cats = [Cat(200, screen.bottom() - 90, Cat.BOTTOM)]
+        self.cats = [Cat(0, screen.bottom(), Cat.BOTTOM)]
         self.multiply_timer = random.randint(30000, 60000)  # Much less frequent
         self.shutting_down = False  # NEW: Shutdown flag
         
@@ -530,7 +530,7 @@ class CatOverlay(QWidget):
         if len(self.cats) >= 5:
             return
         
-        screen = QApplication.primaryScreen().availableGeometry()
+        screen = QApplication.primaryScreen().geometry()
         # Add only 1 cat per multiplication event
         spawn_count = 1
 
@@ -573,7 +573,7 @@ class CatOverlay(QWidget):
         if self.speed_mag == 0 or self.shutting_down:  # NEW: Guard against shutdown
             return
         
-        screen = QApplication.primaryScreen().availableGeometry()
+        screen = QApplication.primaryScreen().geometry()
         
         # NEW: Iterate over a copy to handle multiplication during iteration
         for cat in list(self.cats):
