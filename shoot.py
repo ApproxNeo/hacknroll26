@@ -1033,9 +1033,14 @@ class ControlPanel(QWidget):
 
         # Buttons
         btn_row = QHBoxLayout()
+        self.btn_shoot = QPushButton("Shoot")
+        self.btn_shoot.clicked.connect(self._shoot)
+
         btn_quit = QPushButton("Quit")
         btn_quit.clicked.connect(QApplication.instance().quit)
+
         btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_shoot)
         btn_row.addWidget(btn_quit)
         root.addLayout(btn_row)
 
@@ -1118,6 +1123,15 @@ class ControlPanel(QWidget):
             self.overlay.show()
         else:
             self.overlay.hide()
+
+    def _shoot(self):
+        # Fire from the sprite overlay's current center position.
+        center_local = QPoint(self.overlay.width() // 2, self.overlay.height() // 2)
+        center_global = self.overlay.mapToGlobal(center_local)
+        try:
+            on_cat_clicked(center_global)
+        except Exception as e:
+            self._append_log(f"Shoot failed: {e}")
 
     def closeEvent(self, event):
         # Closing the control panel exits the app
