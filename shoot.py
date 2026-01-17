@@ -27,7 +27,7 @@ ASSET_DIR = BASE_DIR / "assets"
 EXPLOSION_GIF = ASSET_DIR / "anims/explode.gif"
 EXPLOSION_MP3 = ASSET_DIR / "sounds/explode.mp3"
 PROJECTILE_PNG = ASSET_DIR / "sprites/projectile.png"
-SETTINGS_PATH = ASSET_DIR / "control_panel_settings.json"
+SETTINGS_PATH = BASE_DIR / "control_panel_settings.json"
 
 # Cache the projectile pixmap (and scaled variants) so paint events are cheap.
 _PROJECTILE_PIX: QPixmap = None
@@ -2194,6 +2194,12 @@ class ControlPanel(QWidget):
         self._load_settings()
         self.overlay.set_speed(self.sld_speed.value())
         self.overlay.set_click_through(self.chk_clickthrough.isChecked())
+        
+        # Settings auto reload
+        self._settings_reload_timer = QTimer(self)
+        self._settings_reload_timer.timeout.connect(self._reload_settings_if_changed)
+        self._settings_reload_timer.start(5000)  # Reload every 5 seconds
+        self._last_settings_mtime = 0
 
     def _run_action(self, action_str: str):
         action_json = action_str.strip()
@@ -2299,8 +2305,10 @@ class ControlPanel(QWidget):
 
     def _on_direction_changed(self, right_to_left: bool):
         global _SHOOT_DIRECTION
+        old = _SHOOT_DIRECTION
         _SHOOT_DIRECTION = "right_to_left" if right_to_left else "left_to_right"
-        self._append_log(f"Shooting direction: {_SHOOT_DIRECTION}")
+        if old != _SHOOT_DIRECTION:
+            self._append_log(f"Shooting direction: {_SHOOT_DIRECTION}")
         self._maybe_save_settings()
 
     def _on_projectile_color(self):
@@ -2328,6 +2336,24 @@ class ControlPanel(QWidget):
         if getattr(self, "_loading_settings", False):
             return
         self._save_settings()
+        
+    def _reload_settings_if_changed(self):
+        """Check if settings file has been modified and reload if needed"""
+        try:
+            if not self._settings_path.exists():
+                return
+                
+            # Get current modification time
+            current_mtime = self._settings_path.stat().st_mtime
+            
+            # If file has been modified since last check
+            if current_mtime > self._last_settings_mtime:
+                self._last_settings_mtime = current_mtime
+                self._load_settings()
+                # self._append_log("Settings reloaded from file")
+        except Exception as e:
+            # Don't spam the log with errors on every failed check
+            pass
 
     def _load_settings(self):
         data = {}
@@ -2336,6 +2362,7 @@ class ControlPanel(QWidget):
                 data = json.loads(self._settings_path.read_text(encoding="utf-8"))
         except Exception:
             data = {}
+        print(data)
 
         self._loading_settings = True
         try:
