@@ -10,11 +10,11 @@ EXPLOSION_GIF = BASE_DIR / "explode.gif"
 PROJECTILE_PNG = BASE_DIR / "projectile.png"
 
 # Cache the projectile pixmap (and scaled variants) so paint events are cheap.
-_PROJECTILE_PIX: QPixmap | None = None
+_PROJECTILE_PIX: QPixmap = None
 _PROJECTILE_SCALED: dict[int, QPixmap] = {}
 
 
-def _get_projectile_pixmap(target_size: int) -> QPixmap | None:
+def _get_projectile_pixmap(target_size: int) -> QPixmap:
     """Load projectile.png if present and return a scaled pixmap sized ~target_size."""
     global _PROJECTILE_PIX, _PROJECTILE_SCALED
     target_size = max(1, int(target_size))
