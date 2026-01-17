@@ -764,7 +764,7 @@ def shoot_projectile_local_exit_right(start_global_pos: QPoint, vx: float, vy: f
     sx, sy = _norm_point(start_global_pos)
 
     # Stop slightly beyond the right edge so it visually exits.
-    x_end = 1.05
+    x_end = 1.05  # local: travel slightly past right edge before disappearing
     if vx <= 0.0:
         return "Projectile vx must be > 0"
 
@@ -783,7 +783,15 @@ def shoot_projectile_local_exit_right(start_global_pos: QPoint, vx: float, vy: f
     return None
 
 
-def shoot_projectile_remote_arrive_left(sx: float, sy: float, vx: float, vy0: float, g: float) -> str:
+def shoot_projectile_remote_arrive_left(
+    sx: float,
+    sy: float,
+    vx: float,
+    vy0: float,
+    g: float,
+    *,
+    start_delay_ms: int = None,
+) -> str:
     # On the remote (right) machine, start from the left edge and land where the physics dictates,
     # based on the sender's cat origin (sx, sy).
     geo = QApplication.primaryScreen().availableGeometry()
@@ -791,31 +799,48 @@ def shoot_projectile_remote_arrive_left(sx: float, sy: float, vx: float, vy0: fl
     if vx <= 0.0:
         return "Projectile vx must be > 0"
 
-    # Time to cross from sender's x=sx to the sender's right edge (x=1.0).
-    t_cross = (1.0 - sx) / vx
-    if t_cross < 0.0:
-        t_cross = 0.0
+    # Match the sender: local projectile runs until x=1.05 then disappears.
+    x_exit = 1.05
+    x_entry = -0.05
 
-    # State at boundary crossing.
-    y_cross = sy + vy0 * t_cross + 0.5 * g * t_cross * t_cross
-    vy_cross = vy0 + g * t_cross
+    # Time from sender start until it fully exits (x=1.05).
+    t_exit = (x_exit - sx) / vx
+    if t_exit < 0.0:
+        t_exit = 0.0
 
-    # Start slightly offscreen to the left so it visibly enters.
-    x0 = -0.05
-    y0 = y_cross
+    # State at the moment it fully exits on the sender.
+    y_exit = sy + vy0 * t_exit + 0.5 * g * t_exit * t_exit
+    vy_exit = vy0 + g * t_exit
+
+    # Remote starts slightly offscreen to the left at the same state.
+    x0 = x_entry
+    y0 = y_exit
 
     # Solve landing time back to the original start height sy.
-    t_land = _solve_landing_time(y0, vy_cross, g, sy)
+    t_land = _solve_landing_time(y0, vy_exit, g, sy)
 
-    try:
-        proj = ProjectileOverlay(geo, x0, y0, vx, vy_cross, g, t_land)
-    except Exception as e:
-        return f"Failed to start remote projectile: {e}"
+    # Delay remote start so it visually syncs with the sender exiting the screen.
+    if start_delay_ms is None:
+        start_delay_ms = int(round(t_exit * 1000.0))
+    else:
+        start_delay_ms = max(0, int(start_delay_ms))
 
-    _active_projectiles.append(proj)
-    proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
-    proj.finished.connect(lambda p: show_explosion(p))
-    proj.show()
+    def _spawn():
+        try:
+            proj = ProjectileOverlay(geo, x0, y0, vx, vy_exit, g, t_land)
+        except Exception as e:
+            try:
+                print(f"Failed to start remote projectile: {e}")
+            except Exception:
+                pass
+            return
+
+        _active_projectiles.append(proj)
+        proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
+        proj.finished.connect(lambda p: show_explosion(p))
+        proj.show()
+
+    QTimer.singleShot(int(start_delay_ms), _spawn)
     return None
 
 
@@ -995,7 +1020,8 @@ class ControlPanel(QWidget):
                     self._append_log(f"Invalid cannon payload: {e}")
                     return
 
-                err = shoot_projectile_remote_arrive_left(sx, sy, vx, vy, g)
+                delay_ms = action_json.get("delay_ms", None)
+                err = shoot_projectile_remote_arrive_left(sx, sy, vx, vy, g, start_delay_ms=delay_ms)
                 if err:
                     self._append_log(err)
                     return
@@ -1092,7 +1118,11 @@ def on_cat_clicked(global_pos: QPoint):
     import math
     vy = -math.sqrt(max(0.0, 2.0 * g * peak_h))
 
-    data = {"action": "cannon", "sx": sx, "sy": sy, "vx": vx, "vy": vy, "g": g}
+    # Delay for the remote start: match the time until this projectile fully exits the local screen.
+    x_exit = 1.05
+    delay_ms = int(round(max(0.0, (x_exit - sx) / vx) * 1000.0))
+
+    data = {"action": "cannon", "sx": sx, "sy": sy, "vx": vx, "vy": vy, "g": g, "delay_ms": delay_ms}
     msg = json.dumps(data)
 
     # Local effect: start at the cat and exit the local screen to the right (no explosion).
