@@ -1472,22 +1472,38 @@ def on_cat_clicked(global_pos: QPoint):
     # Sender cat origin in normalized coordinates.
     sx, sy = _norm_point(global_pos)
 
-    # Tuned constants in normalized-units-per-second.
-    # These produce a stable, "natural" arc that crosses into the remote screen.
-    g = 2.5
-    
-    # Choose peak height as a fraction of screen height.
-    peak_h = 0.25
     import math
+
+    # Randomize arc per shot (shared with peer via payload).
+    # g: normalized units/s^2 (positive, y increases downward)
+    g = random.uniform(2.0, 3.4)
+
+    # Peak height as a fraction of screen height (higher => larger arc).
+    peak_h = random.uniform(0.18, 0.35)
+
+    # Initial vertical velocity that yields the chosen peak height.
     vy = -math.sqrt(max(0.0, 2.0 * g * peak_h))
 
     if _SHOOT_DIRECTION == "right_to_left":
-        # Shooting from right to left
-        vx = -1.25  # Negative velocity for leftward motion
+        # Randomize horizontal speed per shot (shared with peer via payload).
+        vx = -random.uniform(0.9, 1.6)  # Negative velocity for leftward motion
         x_exit = -0.05
-        delay_ms = int(round(max(0.0, (x_exit - sx) / vx) * 1000.0))
 
-        land_ny = random.uniform(0.25, 0.85)
+        t_exit = (x_exit - sx) / vx
+        if t_exit < 0.0:
+            t_exit = 0.0
+        delay_ms = int(round(t_exit * 1000.0))
+
+        # Choose a landing Y that is reachable from the exit state (so the remote arc stays aligned).
+        y_exit = sy + vy * t_exit + 0.5 * g * t_exit * t_exit
+        vy_exit = vy + g * t_exit
+        y_min_exit = y_exit - (vy_exit * vy_exit) / (2.0 * g) if g > 1e-9 else y_exit
+
+        low = max(0.05, min(0.95, y_min_exit + 0.02))
+        high = 0.90
+        if low >= high:
+            high = min(0.95, low + 0.10)
+        land_ny = random.uniform(low, high)
         data = {
             "action": "cannon",
             "sx": sx,
@@ -1509,12 +1525,25 @@ def on_cat_clicked(global_pos: QPoint):
             except Exception:
                 pass
     else:
-        # Default: shooting from left to right
-        vx = 1.25  # Positive velocity for rightward motion
+        # Randomize horizontal speed per shot (shared with peer via payload).
+        vx = random.uniform(0.9, 1.6)  # Positive velocity for rightward motion
         x_exit = 1.05
-        delay_ms = int(round(max(0.0, (x_exit - sx) / vx) * 1000.0))
 
-        land_ny = random.uniform(0.25, 0.85)
+        t_exit = (x_exit - sx) / vx
+        if t_exit < 0.0:
+            t_exit = 0.0
+        delay_ms = int(round(t_exit * 1000.0))
+
+        # Choose a landing Y that is reachable from the exit state (so the remote arc stays aligned).
+        y_exit = sy + vy * t_exit + 0.5 * g * t_exit * t_exit
+        vy_exit = vy + g * t_exit
+        y_min_exit = y_exit - (vy_exit * vy_exit) / (2.0 * g) if g > 1e-9 else y_exit
+
+        low = max(0.05, min(0.95, y_min_exit + 0.02))
+        high = 0.90
+        if low >= high:
+            high = min(0.95, low + 0.10)
+        land_ny = random.uniform(low, high)
         data = {
             "action": "cannon",
             "sx": sx,
