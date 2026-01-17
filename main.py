@@ -1,3 +1,5 @@
+import math
+import random
 import sys
 from pathlib import Path
 
@@ -46,6 +48,7 @@ class SpriteOverlay(QWidget):
 
         # Movement timer (demo: drift diagonally and bounce)
         self.vel = QPoint(3, 2)
+        self.speed_mag = max(abs(self.vel.x()), abs(self.vel.y())) or 1
         self.move_timer = QTimer(self)
         self.move_timer.timeout.connect(self.tick_move)
         self.move_timer.start(16)  # ~60Hz
@@ -56,10 +59,15 @@ class SpriteOverlay(QWidget):
 
     def set_speed(self, speed: int):
         speed = max(0, int(speed))
-        sx = 1 if self.vel.x() >= 0 else -1
-        sy = 1 if self.vel.y() >= 0 else -1
-        # Keep a slight diagonal by default
-        self.vel = QPoint(sx * speed, sy * max(1 if speed > 0 else 0, int(round(speed * 0.66))))
+        self.speed_mag = speed
+        # Keep the current direction but normalize to the new speed
+        vx, vy = self.vel.x(), self.vel.y()
+        norm = math.hypot(vx, vy)
+        if speed == 0 or norm == 0:
+            self.vel = QPoint(0, 0)
+            return
+        scale = speed / norm
+        self.vel = QPoint(int(round(vx * scale)), int(round(vy * scale)))
 
     def set_click_through(self, enabled: bool):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, bool(enabled))
@@ -84,15 +92,35 @@ class SpriteOverlay(QWidget):
         self.update()
 
     def tick_move(self):
+        if self.speed_mag == 0:
+            return
+
         screen = QApplication.primaryScreen().availableGeometry()
-        p = self.pos() + self.vel
+        pos = self.pos()
 
-        if p.x() < screen.left() or p.x() + self.width() > screen.right():
-            self.vel.setX(-self.vel.x())
-        if p.y() < screen.top() or p.y() + self.height() > screen.bottom():
-            self.vel.setY(-self.vel.y())
+        # Occasionally randomize direction
+        if random.random() < 0.02:
+            angle = random.uniform(0, 2 * math.pi)
+            vx = math.cos(angle) * self.speed_mag
+            vy = math.sin(angle) * self.speed_mag
+            self.vel = QPoint(int(round(vx)), int(round(vy)))
 
-        self.move(self.pos() + self.vel)
+        # If near edges, steer inward with a random inward vector
+        margin = 40
+        if (pos.x() < screen.left() + margin or
+            pos.x() + self.width() > screen.right() - margin or
+            pos.y() < screen.top() + margin or
+            pos.y() + self.height() > screen.bottom() - margin):
+            inward_x = 1 if pos.x() < screen.center().x() else -1
+            inward_y = 1 if pos.y() < screen.center().y() else -1
+            # Add randomness but keep bias inward
+            vx = (inward_x * 0.7 + random.uniform(-0.3, 0.3))
+            vy = (inward_y * 0.7 + random.uniform(-0.3, 0.3))
+            norm = math.hypot(vx, vy) or 1
+            self.vel = QPoint(int(round(vx / norm * self.speed_mag)),
+                              int(round(vy / norm * self.speed_mag)))
+
+        self.move(pos + self.vel)
 
     def paintEvent(self, _):
         painter = QPainter(self)
