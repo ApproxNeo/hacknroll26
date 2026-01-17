@@ -407,6 +407,97 @@ class GifOverlay(QWidget):
         self.deleteLater()
 
 
+# ---- Cannonball Overlay ----
+
+class CannonBallOverlay(QWidget):
+    finished = Signal(QPoint)  # emits landing position
+
+    def __init__(self, start_pos: QPoint, end_pos: QPoint, duration_ms: int = 900, radius: int = 10, arc_height: int = 220):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint |
+            Qt.WindowDoesNotAcceptFocus |
+            Qt.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.NoFocus)
+
+        self._start = QPoint(int(start_pos.x()), int(start_pos.y()))
+        self._end = QPoint(int(end_pos.x()), int(end_pos.y()))
+        self._duration = max(100, int(duration_ms))
+        self._radius = max(2, int(radius))
+        self._arc = int(arc_height)
+
+        # Widget size is just big enough to draw the ball.
+        d = self._radius * 2 + 2
+        self.resize(d, d)
+
+        # Start at start_pos (centered).
+        self._t0 = QDateTime.currentMSecsSinceEpoch()
+        self._set_center(self._start)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(16)
+
+    def _set_center(self, p: QPoint):
+        # Move widget so that its center sits on p.
+        self.move(int(p.x() - self.width() // 2), int(p.y() - self.height() // 2))
+
+    def _tick(self):
+        now = QDateTime.currentMSecsSinceEpoch()
+        t = (now - self._t0) / float(self._duration)
+        if t >= 1.0:
+            self._timer.stop()
+            self._set_center(self._end)
+            self.finished.emit(self._end)
+            self.close()
+            self.deleteLater()
+            return
+
+        # Linear interpolation + parabola arc.
+        x0, y0 = self._start.x(), self._start.y()
+        x1, y1 = self._end.x(), self._end.y()
+        x = x0 + (x1 - x0) * t
+        y = y0 + (y1 - y0) * t
+
+        # Screen Y grows downward; subtract to arc upward.
+        y = y - self._arc * 4.0 * t * (1.0 - t)
+
+        self._set_center(QPoint(int(x), int(y)))
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        # Clear backing store.
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+        # Draw a simple dark cannonball with a subtle highlight.
+        r = self._radius
+        cx = self.width() // 2
+        cy = self.height() // 2
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(Qt.black)
+        painter.drawEllipse(QPoint(cx, cy), r, r)
+
+        painter.setBrush(Qt.white)
+        painter.setOpacity(0.25)
+        painter.drawEllipse(QPoint(cx - max(2, r // 3), cy - max(2, r // 3)), max(2, r // 3), max(2, r // 3))
+        painter.setOpacity(1.0)
+
+
+_active_cannonballs: list[CannonBallOverlay] = []
+
+
 _active_explosions: list[GifOverlay] = []
 
 
@@ -424,6 +515,147 @@ def show_explosion(global_pos: QPoint) -> str:
     overlay.finished.connect(lambda ov=overlay: _active_explosions.remove(ov) if ov in _active_explosions else None)
     overlay.show()
     overlay.movie.start()
+    return None
+
+
+# ---- Cannonball helpers ----
+
+def _norm_point(global_pos: QPoint) -> tuple[float, float]:
+    screen = QApplication.screenAt(global_pos) or QApplication.primaryScreen()
+    geo = screen.availableGeometry() if screen else QApplication.primaryScreen().availableGeometry()
+
+    # Clamp within the screen so we stay in [0,1].
+    x = max(geo.left(), min(int(global_pos.x()), geo.right() - 1))
+    y = max(geo.top(), min(int(global_pos.y()), geo.bottom() - 1))
+
+    nx = (x - geo.left()) / float(max(1, geo.width()))
+    ny = (y - geo.top()) / float(max(1, geo.height()))
+    return float(nx), float(ny)
+
+
+
+def _denorm_point(nx: float, ny: float, reference_pos: QPoint = None) -> QPoint:
+    ref = reference_pos or QPoint(0, 0)
+    screen = QApplication.screenAt(ref) or QApplication.primaryScreen()
+    geo = screen.availableGeometry() if screen else QApplication.primaryScreen().availableGeometry()
+
+    x = geo.left() + int(nx * geo.width())
+    y = geo.top() + int(ny * geo.height())
+
+    # Clamp.
+    x = max(geo.left(), min(x, geo.right() - 1))
+    y = max(geo.top(), min(y, geo.bottom() - 1))
+    return QPoint(int(x), int(y))
+
+
+def _cannon_origin_for_screen_pos(reference_pos: QPoint) -> QPoint:
+    screen = QApplication.screenAt(reference_pos) or QApplication.primaryScreen()
+    geo = screen.availableGeometry() if screen else QApplication.primaryScreen().availableGeometry()
+    return QPoint(geo.left() + 60, geo.bottom() - 60)
+
+
+def _extend_line_offscreen(start: QPoint, through: QPoint, *, margin: int = 160) -> QPoint:
+    """Return a point beyond the screen bounds along the ray start->through."""
+    screen = QApplication.screenAt(start) or QApplication.screenAt(through) or QApplication.primaryScreen()
+    geo = screen.availableGeometry() if screen else QApplication.primaryScreen().availableGeometry()
+
+    sx, sy = float(start.x()), float(start.y())
+    tx, ty = float(through.x()), float(through.y())
+    dx, dy = (tx - sx), (ty - sy)
+    if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+        dx, dy = 1.0, 0.0
+
+    # Find t where (sx + t*dx, sy + t*dy) exits the screen rect.
+    t_candidates = []
+
+    # Vertical sides
+    if abs(dx) > 1e-6:
+        t_left = (geo.left() - sx) / dx
+        t_right = ((geo.right() - 1) - sx) / dx
+        t_candidates.extend([t_left, t_right])
+
+    # Horizontal sides
+    if abs(dy) > 1e-6:
+        t_top = (geo.top() - sy) / dy
+        t_bottom = ((geo.bottom() - 1) - sy) / dy
+        t_candidates.extend([t_top, t_bottom])
+
+    # Take the smallest t > 0 that gets us to a boundary, then push further by margin.
+    t_exit = None
+    for t in sorted(t_candidates):
+        if t > 0:
+            x = sx + t * dx
+            y = sy + t * dy
+            if geo.left() - 2 <= x <= geo.right() + 2 and geo.top() - 2 <= y <= geo.bottom() + 2:
+                t_exit = t
+                break
+
+    if t_exit is None:
+        t_exit = 1.0
+
+    # Normalize direction and go beyond boundary.
+    import math
+    mag = math.hypot(dx, dy)
+    ux, uy = dx / mag, dy / mag
+    x2 = sx + t_exit * dx + ux * margin
+    y2 = sy + t_exit * dy + uy * margin
+    return QPoint(int(round(x2)), int(round(y2)))
+
+
+def _offscreen_start_towards_target(target: QPoint, vx: float, vy: float, *, margin: int = 160) -> QPoint:
+    """Return an offscreen start point so the ball flies along +v into target."""
+    screen = QApplication.screenAt(target) or QApplication.primaryScreen()
+    geo = screen.availableGeometry() if screen else QApplication.primaryScreen().availableGeometry()
+
+    import math
+    mag = math.hypot(vx, vy)
+    if mag < 1e-6:
+        vx, vy = 1.0, 0.0
+        mag = 1.0
+    ux, uy = vx / mag, vy / mag
+
+    # Step backwards from target until we're outside the rect, then add margin.
+    step = max(geo.width(), geo.height()) * 2
+    x0 = float(target.x()) - ux * step
+    y0 = float(target.y()) - uy * step
+
+    # Ensure outside + margin.
+    x0 -= ux * margin
+    y0 -= uy * margin
+    return QPoint(int(round(x0)), int(round(y0)))
+
+
+def shoot_cannon_to(
+    target_global_pos: QPoint,
+    start_global_pos: QPoint = None,
+    *,
+    explode_on_land: bool = True,
+    duration_ms: int = 900,
+    arc_height: int = 220,
+) -> str:
+    # Choose a start position: bottom-left-ish of the screen containing the target.
+    screen = QApplication.screenAt(target_global_pos) or QApplication.primaryScreen()
+    geo = screen.availableGeometry() if screen else QApplication.primaryScreen().availableGeometry()
+
+    if start_global_pos is None:
+        start_global_pos = QPoint(geo.left() + 60, geo.bottom() - 60)
+
+    try:
+        ball = CannonBallOverlay(start_global_pos, target_global_pos, duration_ms=duration_ms, arc_height=arc_height)
+    except Exception as e:
+        return f"Failed to start cannonball: {e}"
+
+    _active_cannonballs.append(ball)
+    ball.finished.connect(lambda _p, b=ball: _active_cannonballs.remove(b) if b in _active_cannonballs else None)
+
+    if explode_on_land:
+        def _on_land(p: QPoint):
+            # Explosion on landing.
+            show_explosion(p)
+
+        ball.finished.connect(_on_land)
+
+    ball.show()
     return None
 
 
@@ -543,16 +775,52 @@ class ControlPanel(QWidget):
         except Exception as e:
             self._append_log(f"Invalid action JSON: {e}")
             return
-        
-        if action_json["action"] == "fire":
+
+        action = action_json.get("action")
+
+        if action == "fire":
             x = action_json.get("x", 0)
             y = action_json.get("y", 0)
             err = show_explosion(QPoint(int(x), int(y)))
             if err:
                 self._append_log(err)
                 return
-
             self._append_log(f"Showing 'fire' action at ({x}, {y})")
+            return
+
+        if action == "cannon":
+            # Prefer normalized coordinates so different screen sizes still work.
+            if "nx" in action_json and "ny" in action_json:
+                try:
+                    nx = float(action_json.get("nx", 0.5))
+                    ny = float(action_json.get("ny", 0.5))
+                except Exception:
+                    nx, ny = 0.5, 0.5
+                target = _denorm_point(nx, ny)
+            else:
+                x = action_json.get("x", 0)
+                y = action_json.get("y", 0)
+                target = QPoint(int(x), int(y))
+
+            # If direction is provided, start offscreen so it "arrives" on this machine.
+            vx = action_json.get("vx", None)
+            vy = action_json.get("vy", None)
+            start = None
+            if vx is not None and vy is not None:
+                try:
+                    vx = float(vx)
+                    vy = float(vy)
+                    start = _offscreen_start_towards_target(target, vx, vy)
+                except Exception:
+                    start = None
+
+            err = shoot_cannon_to(target, start_global_pos=start, explode_on_land=True)
+            if err:
+                self._append_log(err)
+                return
+
+            self._append_log(f"Cannonball received; landing at ({target.x()}, {target.y()})")
+            return
 
     def _append_log(self, text: str):
         ts = QDateTime.currentDateTime().toString("HH:mm:ss")
@@ -603,13 +871,36 @@ def _first_ipv4(addresses: list[bytes]) -> str:
 # Auto-connect client to the first discovered peer (if not already connected).
 _connected_to: tuple[str, int] = None
 
-# When the cat is clicked, send a message through the client and server.
+
+# When the cat is clicked, shoot OUT of this screen locally, and send the shot to peers.
 def on_cat_clicked(global_pos: QPoint):
-    data = {"action": "fire", "x": global_pos.x(), "y": global_pos.y()}
-    
+    # Target (where the remote will see it land).
+    nx, ny = _norm_point(global_pos)
+
+    # Compute a direction vector in normalized screen space from a local cannon origin.
+    origin = _cannon_origin_for_screen_pos(global_pos)
+    ox, oy = _norm_point(origin)
+    vx = nx - ox
+    vy = ny - oy
+    # Normalize.
+    import math
+    mag = math.hypot(vx, vy)
+    if mag < 1e-6:
+        vx, vy = 1.0, 0.0
+    else:
+        vx, vy = vx / mag, vy / mag
+
+    data = {"action": "cannon", "nx": nx, "ny": ny, "vx": vx, "vy": vy}
     msg = json.dumps(data)
+
+    # Local effect: launch from origin THROUGH the click and exit the screen (no explosion).
+    local_target = _denorm_point(nx, ny, reference_pos=global_pos)
+    offscreen_end = _extend_line_offscreen(origin, local_target)
+    shoot_cannon_to(offscreen_end, start_global_pos=origin, explode_on_land=False)
+
     # Send to peers connected to our server
     server.broadcast(msg)
+
     # Send to a peer we connected to as a client
     client.send(msg)
 
