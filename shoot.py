@@ -34,7 +34,15 @@ _PROJECTILE_SCALED: dict[int, QPixmap] = {}
 _SHOOT_DIRECTION: str = "left_to_right"  # "left_to_right" or "right_to_left"
 
 # Sprite scaling (1.0 = original frame size). Reduce to make the cat smaller.
+
 CAT_SCALE: float = 0.6
+
+# Visual insets (px) so the *drawn* cat appears flush to the screen edge.
+# The current cat drawing has significant transparent padding inside its 300x270 box.
+CAT_EDGE_INSET_TOP: int = 23
+CAT_EDGE_INSET_LEFT: int = 78
+CAT_EDGE_INSET_RIGHT: int = 78
+CAT_EDGE_INSET_BOTTOM: int = 0
 
 
 def _get_projectile_pixmap(target_size: int) -> QPixmap:
@@ -222,7 +230,7 @@ class Cat:
     
     def _update_bottom_edge(self, screen_rect: QRect):
         """Cat walking on bottom edge"""
-        ground_y = screen_rect.bottom() - self.height
+        ground_y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
         
         if self.is_jumping:
             self.jump_vel += self.gravity
@@ -244,7 +252,7 @@ class Cat:
                 if min_dist == dist_to_left:
                     # Flip to left edge
                     self.edge = Cat.LEFT
-                    self.x = screen_rect.left()
+                    self.x = screen_rect.left() - self.width
                 elif min_dist == dist_to_right:
                     # Flip to right edge
                     self.edge = Cat.RIGHT
@@ -252,7 +260,7 @@ class Cat:
                 else:
                     # Flip to top edge
                     self.edge = Cat.TOP
-                    self.y = screen_rect.top()
+                    self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
                 
                 self.is_jumping = False
                 self.jump_vel = 0
@@ -275,7 +283,7 @@ class Cat:
     
     def _update_top_edge(self, screen_rect: QRect):
         """Cat walking upside down on top edge"""
-        ground_y = screen_rect.top()
+        ground_y = screen_rect.top() - CAT_EDGE_INSET_TOP
         
         if self.is_jumping:
             self.jump_vel += self.gravity
@@ -296,7 +304,7 @@ class Cat:
                 if min_dist == dist_to_left:
                     # Flip to left edge
                     self.edge = Cat.LEFT
-                    self.x = screen_rect.left()
+                    self.x = screen_rect.left() - self.width
                 elif min_dist == dist_to_right:
                     # Flip to right edge
                     self.edge = Cat.RIGHT
@@ -304,7 +312,7 @@ class Cat:
                 else:
                     # Flip to bottom edge
                     self.edge = Cat.BOTTOM
-                    self.y = screen_rect.bottom() - self.height
+                    self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
                 
                 self.is_jumping = False
                 self.jump_vel = 0
@@ -326,7 +334,7 @@ class Cat:
         if self.x + self.width < screen_rect.left():
             # Walked off left side, spawn on left wall
             self.edge = Cat.LEFT
-            self.x = screen_rect.left()
+            self.x = screen_rect.left() - self.width
         elif self.x > screen_rect.right():
             # Walked off right side, spawn on right wall
             self.edge = Cat.RIGHT
@@ -337,7 +345,7 @@ class Cat:
     
     def _update_left_edge(self, screen_rect: QRect):
         """Cat walking on left edge"""
-        ground_x = screen_rect.left()
+        ground_x = screen_rect.left() - CAT_EDGE_INSET_LEFT
         
         if self.is_jumping:
             self.jump_vel += self.gravity
@@ -358,15 +366,15 @@ class Cat:
                 if min_dist == dist_to_top:
                     # Flip to top edge
                     self.edge = Cat.TOP
-                    self.y = screen_rect.top()
+                    self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
                 elif min_dist == dist_to_bottom:
                     # Flip to bottom edge
                     self.edge = Cat.BOTTOM
-                    self.y = screen_rect.bottom() - self.height
+                    self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
                 else:
                     # Flip to right edge
                     self.edge = Cat.RIGHT
-                    self.x = screen_rect.right() - self.width
+                    self.x = (screen_rect.right() - self.width + 1) + CAT_EDGE_INSET_RIGHT
                 
                 self.is_jumping = False
                 self.jump_vel = 0
@@ -388,18 +396,18 @@ class Cat:
         if self.y + self.height < screen_rect.top():
             # Walked off top, spawn on top wall
             self.edge = Cat.TOP
-            self.y = screen_rect.top()
+            self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
         elif self.y > screen_rect.bottom():
             # Walked off bottom, spawn on bottom wall
             self.edge = Cat.BOTTOM
-            self.y = screen_rect.bottom() - self.height
+            self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
         
         if random.random() < 0.05:
             self.facing = -self.facing  # Flip direction instead of random choice
     
     def _update_right_edge(self, screen_rect: QRect):
         """Cat walking on right edge"""
-        ground_x = screen_rect.right() - self.width
+        ground_x = (screen_rect.right() - self.width + 1) + CAT_EDGE_INSET_RIGHT
         
         if self.is_jumping:
             self.jump_vel += self.gravity
@@ -420,15 +428,15 @@ class Cat:
                 if min_dist == dist_to_top:
                     # Flip to top edge
                     self.edge = Cat.TOP
-                    self.y = screen_rect.top()
+                    self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
                 elif min_dist == dist_to_bottom:
                     # Flip to bottom edge
                     self.edge = Cat.BOTTOM
-                    self.y = screen_rect.bottom() - self.height
+                    self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
                 else:
                     # Flip to left edge
                     self.edge = Cat.LEFT
-                    self.x = screen_rect.left()
+                    self.x = screen_rect.left() - CAT_EDGE_INSET_LEFT
                 
                 self.is_jumping = False
                 self.jump_vel = 0
@@ -450,11 +458,11 @@ class Cat:
         if self.y + self.height < screen_rect.top():
             # Walked off top, spawn on top wall
             self.edge = Cat.TOP
-            self.y = screen_rect.top()
+            self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
         elif self.y > screen_rect.bottom():
             # Walked off bottom, spawn on bottom wall
             self.edge = Cat.BOTTOM
-            self.y = screen_rect.bottom() - self.height
+            self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
         
         if random.random() < 0.05:
             self.facing = -self.facing  # Flip direction instead of random choice
@@ -485,15 +493,15 @@ class Cat:
         
         if self.edge == self.BOTTOM:
             self.x = random.randint(screen_rect.left(), max(screen_rect.left(), screen_rect.right() - self.width))
-            self.y = screen_rect.bottom() - self.height
+            self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
         elif self.edge == self.TOP:
             self.x = random.randint(screen_rect.left(), max(screen_rect.left(), screen_rect.right() - self.width))
-            self.y = screen_rect.top()
+            self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
         elif self.edge == self.LEFT:
-            self.x = screen_rect.left()
+            self.x = screen_rect.left() - CAT_EDGE_INSET_LEFT
             self.y = random.randint(screen_rect.top(), max(screen_rect.top(), screen_rect.bottom() - self.height))
         elif self.edge == self.RIGHT:
-            self.x = screen_rect.right() - self.width
+            self.x = (screen_rect.right() - self.width + 1) + CAT_EDGE_INSET_RIGHT
             self.y = random.randint(screen_rect.top(), max(screen_rect.top(), screen_rect.bottom() - self.height))
         
         self.facing = random.choice([1, -1])
@@ -501,17 +509,35 @@ class Cat:
     
     def _clamp_to_screen(self, screen_rect: QRect):
         """Force cat position to stay within screen boundaries"""
+        # Base limits (Qt QRect right()/bottom() are inclusive, so +1 for max top-left).
+        min_x = screen_rect.left()
+        max_x = screen_rect.right() - self.width + 1
+        min_y = screen_rect.top()
+        max_y = screen_rect.bottom() - self.height + 1
+
+        # Allow small overscan so the visible cat (which is centered inside its box)
+        # can appear flush to the edges.
+        if self.edge == self.LEFT:
+            min_x -= CAT_EDGE_INSET_LEFT
+        elif self.edge == self.RIGHT:
+            max_x += CAT_EDGE_INSET_RIGHT
+
+        if self.edge == self.TOP:
+            min_y -= CAT_EDGE_INSET_TOP
+        elif self.edge == self.BOTTOM:
+            max_y += CAT_EDGE_INSET_BOTTOM
+
         # Clamp X position
-        if self.x < screen_rect.left():
-            self.x = screen_rect.left()
-        elif self.x + self.width > screen_rect.right():
-            self.x = screen_rect.right() - self.width
-        
+        if self.x < min_x:
+            self.x = min_x
+        elif self.x > max_x:
+            self.x = max_x
+
         # Clamp Y position
-        if self.y < screen_rect.top():
-            self.y = screen_rect.top()
-        elif self.y + self.height > screen_rect.bottom():
-            self.y = screen_rect.bottom() - self.height
+        if self.y < min_y:
+            self.y = min_y
+        elif self.y > max_y:
+            self.y = max_y
     
     def _ensure_on_screen(self, screen_rect: QRect):
         """Check if cat went off screen and flip to random edge"""
@@ -531,15 +557,15 @@ class Cat:
         
         if self.edge == self.BOTTOM:
             self.x = random.randint(screen_rect.left(), max(screen_rect.left(), screen_rect.right() - self.width))
-            self.y = screen_rect.bottom() - self.height
+            self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
         elif self.edge == self.TOP:
             self.x = random.randint(screen_rect.left(), max(screen_rect.left(), screen_rect.right() - self.width))
-            self.y = screen_rect.top()
+            self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
         elif self.edge == self.LEFT:
-            self.x = screen_rect.left()
+            self.x = screen_rect.left() - CAT_EDGE_INSET_LEFT
             self.y = random.randint(screen_rect.top(), max(screen_rect.top(), screen_rect.bottom() - self.height))
         elif self.edge == self.RIGHT:
-            self.x = screen_rect.right() - self.width
+            self.x = (screen_rect.right() - self.width + 1) + CAT_EDGE_INSET_RIGHT
             self.y = random.randint(screen_rect.top(), max(screen_rect.top(), screen_rect.bottom() - self.height))
         
         self.facing = random.choice([1, -1])
@@ -2323,7 +2349,6 @@ if __name__ == "__main__":
     _hotkey_listener = None
 
     def _hotkey_shoot():
-        print("_hotkey_shoot")
         # Fire from the sprite overlay's current center position.
         center_local = QPoint(w.width() // 2, w.height() // 2)
         center_global = w.mapToGlobal(center_local)
