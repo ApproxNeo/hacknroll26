@@ -413,6 +413,8 @@ class GifOverlay(QWidget):
         if size.width() <= 0 or size.height() <= 0:
             size = QSize(128, 128)
 
+        size.setWidth(size.width() / 2)
+        size.setHeight(size.height() / 2)
         self.resize(size)
         self.label.resize(size)
 
@@ -1034,6 +1036,17 @@ class ControlPanel(QWidget):
 
         root = QVBoxLayout(self)
 
+        # Speed
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("Speed"))
+        self.sld_speed = QSlider(Qt.Horizontal)
+        self.sld_speed.setRange(0, 30)
+        # default from current velocity magnitude
+        self.sld_speed.setValue(max(abs(self.overlay.vel.x()), abs(self.overlay.vel.y())))
+        self.sld_speed.valueChanged.connect(self.overlay.set_speed)
+        speed_row.addWidget(self.sld_speed)
+        root.addLayout(speed_row)
+    
         # Visibility
         self.chk_visible = QCheckBox("Show sprite overlay")
         self.chk_visible.setChecked(True)
@@ -1057,20 +1070,18 @@ class ControlPanel(QWidget):
         self.chk_direction.setChecked(False)
         self.chk_direction.toggled.connect(self._on_direction_changed)
         root.addWidget(self.chk_direction)
+        
+        # Shoot config
+        shoot_row = QHBoxLayout()
+        self.btn_shoot = QPushButton("Shoot")
+        self.btn_shoot.clicked.connect(self._shoot)
+        shoot_row.addWidget(self.btn_shoot)
+        root.addLayout(shoot_row)
 
-        # Speed
-        speed_row = QHBoxLayout()
-        speed_row.addWidget(QLabel("Speed"))
-        self.sld_speed = QSlider(Qt.Horizontal)
-        self.sld_speed.setRange(0, 30)
-        # default from current velocity magnitude
-        self.sld_speed.setValue(max(abs(self.overlay.vel.x()), abs(self.overlay.vel.y())))
-        self.sld_speed.valueChanged.connect(self.overlay.set_speed)
-        speed_row.addWidget(self.sld_speed)
-        root.addLayout(speed_row)
-
-        self.lbl_net_status = QLabel("-")
-        root.addWidget(self.lbl_net_status)
+        # Network status / log
+        root.addWidget(QLabel("Network Status / Log:"))
+        # self.lbl_net_status = QLabel("-")
+        # root.addWidget(self.lbl_net_status)
 
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
@@ -1084,14 +1095,11 @@ class ControlPanel(QWidget):
 
         # Buttons
         btn_row = QHBoxLayout()
-        self.btn_shoot = QPushButton("Shoot")
-        self.btn_shoot.clicked.connect(self._shoot)
 
         btn_quit = QPushButton("Quit")
         btn_quit.clicked.connect(QApplication.instance().quit)
 
         btn_row.addStretch(1)
-        btn_row.addWidget(self.btn_shoot)
         btn_row.addWidget(btn_quit)
         root.addLayout(btn_row)
 
