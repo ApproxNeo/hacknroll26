@@ -7,6 +7,17 @@ import random
 import subprocess
 from pathlib import Path
 from PySide6.QtGui import QPainter, QPixmap, QMovie
+
+# Global hotkey (non-blocking). Uses pynput so keypresses still reach other apps.
+try:
+    from pynput import keyboard as _pynput_keyboard  # type: ignore
+    _PYNPUT_AVAILABLE = True
+except Exception:
+    _pynput_keyboard = None  # type: ignore
+    _PYNPUT_AVAILABLE = False
+
+# Debounce global hotkey shots (avoid OS key repeat spam).
+_LAST_HOTKEY_SHOT_MS = 0
 BASE_DIR = Path(__file__).resolve().parent
 EXPLOSION_GIF = BASE_DIR / "explode.gif"
 EXPLOSION_MP3 = BASE_DIR / "explode.mp3"
@@ -16,8 +27,12 @@ PROJECTILE_PNG = BASE_DIR / "projectile.png"
 _PROJECTILE_PIX: QPixmap = None
 _PROJECTILE_SCALED: dict[int, QPixmap] = {}
 
+
 # Shooting direction configuration
 _SHOOT_DIRECTION: str = "left_to_right"  # "left_to_right" or "right_to_left"
+
+# Sprite scaling (1.0 = original frame size). Reduce to make the cat smaller.
+CAT_SCALE: float = 0.6
 
 
 def _get_projectile_pixmap(target_size: int) -> QPixmap:
@@ -267,7 +282,13 @@ class SpriteOverlay(QWidget):
 
     def __init__(self, frames: list[QPixmap], fps: int = 12):
         super().__init__()
-        self.frames = frames
+        # Keep original frames (facing right) and build mirrored frames (facing left).
+        self.frames_right = frames
+        self.frames_left = [QPixmap.fromImage(f.toImage().mirrored(True, False)) for f in frames]
+
+        # Direction: 1 = right, -1 = left
+        self._dir = 1
+        self.frames = self.frames_right
         self.frame_i = 0
 
         # "Windowless" look: no title bar/borders; transparent background; stays on top
@@ -296,11 +317,35 @@ class SpriteOverlay(QWidget):
         self.anim_timer.timeout.connect(self.next_frame)
         self.anim_timer.start(max(1, int(1000 / fps)))
 
-        # Movement timer (demo: drift diagonally and bounce)
-        self.vel = QPoint(3, 2)
+        # Horizontal-only ground movement + occasional jumps.
+        self._speed = 3
+        self._vel_x = self._dir * self._speed  # pixels per tick (~60Hz)
+
+        self._jumping = False
+        self._y = float(self.y())
+        self._vy = 0.0  # pixels / second
+        self._gravity = 1800.0  # pixels / second^2
+        self._ground_margin = 10  # pixels above bottom of available geometry
+
+        self._last_tick_ms = QDateTime.currentMSecsSinceEpoch()
+        self._next_jump_ms = 0
+        self._schedule_next_jump()
+
+        # Occasional random direction changes (not only at screen edges).
+        self._next_turn_ms = 0
+        self._schedule_next_turn()
+
         self.move_timer = QTimer(self)
         self.move_timer.timeout.connect(self.tick_move)
         self.move_timer.start(16)  # ~60Hz
+
+        # Shot-pause state (supports rapid successive shots by extending the pause).
+        self._running = True
+        self._shot_pause_until_ms = 0
+        self._was_moving_before_shot = False
+        self._shot_pause_timer = QTimer(self)
+        self._shot_pause_timer.setSingleShot(True)
+        self._shot_pause_timer.timeout.connect(self._resume_after_shot)
 
     def set_fps(self, fps: int):
         fps = max(1, int(fps))
@@ -308,16 +353,15 @@ class SpriteOverlay(QWidget):
 
     def set_speed(self, speed: int):
         speed = max(0, int(speed))
-        sx = 1 if self.vel.x() >= 0 else -1
-        sy = 1 if self.vel.y() >= 0 else -1
-        # Keep a slight diagonal by default
-        self.vel = QPoint(sx * speed, sy * max(1 if speed > 0 else 0, int(round(speed * 0.66))))
+        self._speed = speed
+        self._vel_x = (1 if getattr(self, "_dir", 1) >= 0 else -1) * speed
 
     def set_click_through(self, enabled: bool):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, bool(enabled))
 
     def set_running(self, running: bool):
         running = bool(running)
+        self._running = running
         if running:
             if not self.anim_timer.isActive():
                 self.anim_timer.start()
@@ -332,15 +376,146 @@ class SpriteOverlay(QWidget):
         self.update()
 
     def tick_move(self):
-        screen = QApplication.primaryScreen().availableGeometry()
-        p = self.pos() + self.vel
+        # Use the screen we're currently on (or primary).
+        screen = QApplication.screenAt(self.pos()) or QApplication.primaryScreen()
+        geo = screen.availableGeometry() if screen else QApplication.primaryScreen().availableGeometry()
 
-        if p.x() < screen.left() or p.x() + self.width() > screen.right():
-            self.vel.setX(-self.vel.x())
-        if p.y() < screen.top() or p.y() + self.height() > screen.bottom():
-            self.vel.setY(-self.vel.y())
+        # Ground Y (top-left widget coordinates).
+        ground_y = int(geo.bottom() - self.height() - self._ground_margin)
 
-        self.move(self.pos() + self.vel)
+        now_ms = QDateTime.currentMSecsSinceEpoch()
+        dt = (now_ms - getattr(self, "_last_tick_ms", now_ms)) / 1000.0
+        self._last_tick_ms = now_ms
+        # Clamp dt to avoid huge jumps after pauses.
+        if dt <= 0.0:
+            dt = 0.016
+        elif dt > 0.05:
+            dt = 0.05
+
+        # Randomly flip direction at occasional times (while away from edges).
+        # This gives the cat more "alive" movement rather than only bouncing.
+        if getattr(self, "_speed", 0) > 0 and now_ms >= getattr(self, "_next_turn_ms", 0):
+            edge_margin = 48  # px
+            within_edges = (self.x() > geo.left() + edge_margin) and (self.x() < (geo.right() - self.width() - edge_margin))
+            if within_edges:
+                self._set_direction(-getattr(self, "_dir", 1))
+            self._schedule_next_turn()
+
+        # Horizontal movement.
+        x = int(self.x() + getattr(self, "_vel_x", 0))
+
+        # Bounce at edges and flip direction when bouncing.
+        min_x = int(geo.left())
+        max_x = int(geo.right() - self.width() + 1)
+        if x < min_x:
+            x = min_x
+            self._set_direction(1)
+        elif x > max_x:
+            x = max_x
+            self._set_direction(-1)
+
+        # Occasional jump trigger.
+        if not self._jumping and now_ms >= getattr(self, "_next_jump_ms", 0):
+            self._start_jump(ground_y)
+            self._schedule_next_jump()
+
+        # Vertical movement (jump physics).
+        if self._jumping:
+            self._y += self._vy * dt
+            self._vy += self._gravity * dt
+            if self._y >= ground_y:
+                # Land.
+                self._y = float(ground_y)
+                self._jumping = False
+                self._vy = 0.0
+        else:
+            # Stick to ground.
+            self._y = float(ground_y)
+
+        self.move(int(x), int(round(self._y)))
+    def _set_direction(self, dir_sign: int):
+        """Update direction and flip frames when changing direction."""
+        dir_sign = 1 if dir_sign >= 0 else -1
+        if dir_sign == getattr(self, "_dir", 1):
+            return
+        self._dir = dir_sign
+        # Keep horizontal speed magnitude.
+        mag = abs(getattr(self, "_vel_x", 0)) or abs(getattr(self, "_speed", 3))
+        self._vel_x = self._dir * mag
+
+        # Swap frame set (flip).
+        self.frames = self.frames_right if self._dir == 1 else self.frames_left
+        self.frame_i = self.frame_i % len(self.frames)
+        self.update()
+
+    def _schedule_next_jump(self):
+        now = QDateTime.currentMSecsSinceEpoch()
+        # Occasional jumps: roughly every 1.2s–4.5s.
+        self._next_jump_ms = now + random.randint(1200, 4500)
+
+    def _schedule_next_turn(self):
+        now = QDateTime.currentMSecsSinceEpoch()
+        # Occasional random turns: roughly every 2.5s–8.0s.
+        self._next_turn_ms = now + random.randint(2500, 8000)
+
+    def _start_jump(self, ground_y: int):
+        if getattr(self, "_jumping", False):
+            return
+        self._jumping = True
+        self._y = float(ground_y)
+        # Negative vy => upward. Tune range for a noticeable but not huge jump.
+        self._vy = -random.uniform(650.0, 950.0)
+
+    def pause_for_shot(self, ms: int = 350):
+        """Pause movement briefly when shooting.
+
+        Supports rapid successive shots by extending the pause window.
+        """
+        return # Disabled for now
+        ms = max(0, int(ms))
+        now = QDateTime.currentMSecsSinceEpoch()
+
+        # If we're not already in a pause window, capture whether we should resume later.
+        if now >= getattr(self, "_shot_pause_until_ms", 0):
+            self._was_moving_before_shot = bool(self.move_timer.isActive())
+
+        # Extend the pause window.
+        new_until = max(getattr(self, "_shot_pause_until_ms", 0), now + ms)
+        self._shot_pause_until_ms = new_until
+
+        # Stop movement timer during the pause.
+        try:
+            self.move_timer.stop()
+        except Exception:
+            pass
+
+        # Schedule (or reschedule) the resume check for the remaining time.
+        remaining = max(0, int(new_until - now))
+        try:
+            self._shot_pause_timer.start(remaining)
+        except Exception:
+            pass
+
+    def _resume_after_shot(self):
+        now = QDateTime.currentMSecsSinceEpoch()
+        until = getattr(self, "_shot_pause_until_ms", 0)
+
+        # If another shot extended the pause, wait again.
+        if now < until:
+            try:
+                self._shot_pause_timer.start(int(until - now))
+            except Exception:
+                pass
+            return
+
+        # Resume only if the user still wants movement running.
+        if getattr(self, "_running", True) and getattr(self, "_was_moving_before_shot", False):
+            try:
+                self.move_timer.start(16)
+            except Exception:
+                pass
+
+        self._was_moving_before_shot = False
 
     def paintEvent(self, _):
         painter = QPainter(self)
@@ -355,6 +530,12 @@ class SpriteOverlay(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            # Stop moving briefly while shooting.
+            try:
+                self.pause_for_shot(350)
+            except Exception:
+                pass
+
             # Use the sprite's center as the "cat position".
             center_local = QPoint(self.width() // 2, self.height() // 2)
             center_global = self.mapToGlobal(center_local)
@@ -1251,7 +1432,7 @@ class ControlPanel(QWidget):
         self.sld_speed = QSlider(Qt.Horizontal)
         self.sld_speed.setRange(0, 30)
         # default from current velocity magnitude
-        self.sld_speed.setValue(max(abs(self.overlay.vel.x()), abs(self.overlay.vel.y())))
+        self.sld_speed.setValue(abs(getattr(self.overlay, "_vel_x", 0)) or 3)
         self.sld_speed.valueChanged.connect(self.overlay.set_speed)
         speed_row.addWidget(self.sld_speed)
         root.addLayout(speed_row)
@@ -1421,6 +1602,12 @@ class ControlPanel(QWidget):
         center_local = QPoint(self.overlay.width() // 2, self.overlay.height() // 2)
         center_global = self.overlay.mapToGlobal(center_local)
         try:
+            # Stop moving briefly while shooting.
+            try:
+                self.overlay.pause_for_shot(350)
+            except Exception:
+                pass
+
             on_cat_clicked(center_global)
         except Exception as e:
             self._append_log(f"Shoot failed: {e}")
@@ -1437,6 +1624,18 @@ def load_frames(folder: str) -> list[QPixmap]:
     frames = [QPixmap(str(p)) for p in paths]
     if not frames or any(f.isNull() for f in frames):
         raise RuntimeError("No valid PNG frames found in ./frames")
+
+    # Scale frames to adjust the cat size.
+    scale = float(globals().get("CAT_SCALE", 1.0))
+    if scale > 0 and abs(scale - 1.0) > 1e-6:
+        scaled_frames: list[QPixmap] = []
+        for f in frames:
+            w = max(1, int(round(f.width() * scale)))
+            h = max(1, int(round(f.height() * scale)))
+            sf = f.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled_frames.append(sf)
+        frames = scaled_frames
+
     return frames
 
 
@@ -1476,17 +1675,18 @@ def on_cat_clicked(global_pos: QPoint):
 
     # Randomize arc per shot (shared with peer via payload).
     # g: normalized units/s^2 (positive, y increases downward)
-    g = random.uniform(2.0, 3.4)
+    g = random.uniform(2.5, 4.0)
 
     # Peak height as a fraction of screen height (higher => larger arc).
-    peak_h = random.uniform(0.18, 0.35)
+    # Increased range to make the arc noticeably higher.
+    peak_h = random.uniform(0.40, 0.60)
 
     # Initial vertical velocity that yields the chosen peak height.
     vy = -math.sqrt(max(0.0, 2.0 * g * peak_h))
 
     if _SHOOT_DIRECTION == "right_to_left":
-        # Randomize horizontal speed per shot (shared with peer via payload).
-        vx = -random.uniform(0.9, 1.6)  # Negative velocity for leftward motion
+        # Slightly slower horizontal speed to steepen the arc.
+        vx = -random.uniform(0.65, 1.15)  # Negative velocity for leftward motion
         x_exit = -0.05
 
         t_exit = (x_exit - sx) / vx
@@ -1525,8 +1725,8 @@ def on_cat_clicked(global_pos: QPoint):
             except Exception:
                 pass
     else:
-        # Randomize horizontal speed per shot (shared with peer via payload).
-        vx = random.uniform(0.9, 1.6)  # Positive velocity for rightward motion
+        # Slightly slower horizontal speed to steepen the arc.
+        vx = random.uniform(0.65, 1.15)  # Positive velocity for rightward motion
         x_exit = 1.05
 
         t_exit = (x_exit - sx) / vx
@@ -1608,5 +1808,69 @@ if __name__ == "__main__":
     panel.show()
 
     zc.status_changed.connect(panel._append_log)
+
+    # --- Global hotkey: press 's' anywhere to shoot (does not block typing in other apps) ---
+    _hotkey_listener = None
+
+    def _hotkey_shoot():
+        print("_hotkey_shoot")
+        # Fire from the sprite overlay's current center position.
+        center_local = QPoint(w.width() // 2, w.height() // 2)
+        center_global = w.mapToGlobal(center_local)
+        try:
+            try:
+                w.pause_for_shot(350)
+            except Exception:
+                pass
+            on_cat_clicked(center_global)
+        except Exception as e:
+            try:
+                panel._append_log(f"Hotkey shoot failed: {e}")
+            except Exception:
+                pass
+
+    def _on_global_key_press(key):
+        # Only react to printable 's'/'S' keys.
+        try:
+            ch = key.char
+        except Exception:
+            return
+        
+        if ch not in ("s", "S"):
+            return
+
+        # Debounce to avoid key repeat flooding.
+        global _LAST_HOTKEY_SHOT_MS
+        now_ms = QDateTime.currentMSecsSinceEpoch()
+        if now_ms - int(_LAST_HOTKEY_SHOT_MS) < 200:
+            return
+        _LAST_HOTKEY_SHOT_MS = now_ms
+
+        # IMPORTANT: this callback is coming from pynput's background thread.
+        # QTimer.singleShot without a receiver schedules on the *current* thread's event loop
+        # (which the pynput thread doesn't have), so it may never fire.
+        # Provide a QObject that lives on the Qt GUI thread so the call is queued correctly.
+        QTimer.singleShot(0, w, _hotkey_shoot)
+
+    if _PYNPUT_AVAILABLE:
+        try:
+            # suppress=False (default) so keypresses still reach other applications.
+            _hotkey_listener = _pynput_keyboard.Listener(on_press=_on_global_key_press, suppress=False)
+            _hotkey_listener.daemon = True
+            _hotkey_listener.start()
+            panel._append_log("Global hotkey enabled: press 's' to shoot")
+        except Exception as e:
+            panel._append_log(f"Global hotkey failed to start: {e}")
+    else:
+        panel._append_log("Global hotkey unavailable (install pynput).")
+
+    def _stop_hotkey():
+        try:
+            if _hotkey_listener is not None:
+                _hotkey_listener.stop()
+        except Exception:
+            pass
+
+    app.aboutToQuit.connect(_stop_hotkey)
 
     sys.exit(app.exec())
