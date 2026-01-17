@@ -12,3 +12,5 @@ lib*/
 site-packages/
 
 pyvenv.cfg
+
+control_panel_settings.json

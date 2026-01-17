@@ -24,6 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent
 EXPLOSION_GIF = BASE_DIR / "explode.gif"
 EXPLOSION_MP3 = BASE_DIR / "explode.mp3"
 PROJECTILE_PNG = BASE_DIR / "projectile.png"
+SETTINGS_PATH = BASE_DIR / "control_panel_settings.json"
 
 # Cache the projectile pixmap (and scaled variants) so paint events are cheap.
 _PROJECTILE_PIX: QPixmap = None
@@ -2109,7 +2110,7 @@ class ControlPanel(QWidget):
         self.sld_speed.setRange(0, 30)
         # default from current velocity magnitude
         self.sld_speed.setValue(abs(getattr(self.overlay, "_vel_x", 0)) or 3)
-        self.sld_speed.valueChanged.connect(self.overlay.set_speed)
+        self.sld_speed.valueChanged.connect(self._on_speed_changed)
         speed_row.addWidget(self.sld_speed)
         root.addLayout(speed_row)
     
@@ -2122,13 +2123,13 @@ class ControlPanel(QWidget):
         # Running
         self.chk_running = QCheckBox("Animate / move")
         self.chk_running.setChecked(True)
-        self.chk_running.toggled.connect(self.overlay.set_running)
+        self.chk_running.toggled.connect(self._on_running)
         root.addWidget(self.chk_running)
 
         # Click-through
         self.chk_clickthrough = QCheckBox("Click-through overlay")
         self.chk_clickthrough.setChecked(True)
-        self.chk_clickthrough.toggled.connect(self.overlay.set_click_through)
+        self.chk_clickthrough.toggled.connect(self._on_clickthrough)
         root.addWidget(self.chk_clickthrough)
 
         # Shooting direction
@@ -2180,6 +2181,9 @@ class ControlPanel(QWidget):
         root.addLayout(btn_row)
 
         # Apply initial settings
+        self._loading_settings = False
+        self._settings_path = SETTINGS_PATH
+        self._load_settings()
         self.overlay.set_speed(self.sld_speed.value())
         self.overlay.set_click_through(self.chk_clickthrough.isChecked())
 
@@ -2283,11 +2287,13 @@ class ControlPanel(QWidget):
             self.overlay.show()
         else:
             self.overlay.hide()
+        self._maybe_save_settings()
 
     def _on_direction_changed(self, right_to_left: bool):
         global _SHOOT_DIRECTION
         _SHOOT_DIRECTION = "right_to_left" if right_to_left else "left_to_right"
         self._append_log(f"Shooting direction: {_SHOOT_DIRECTION}")
+        self._maybe_save_settings()
 
     def _on_projectile_color(self):
         color = _parse_color(self.txt_projectile_color.text())
@@ -2296,6 +2302,70 @@ class ControlPanel(QWidget):
             return
         set_projectile_color(color)
         self.txt_projectile_color.setText(color.name(QColor.HexRgb))
+        self._maybe_save_settings()
+
+    def _on_speed_changed(self, value: int):
+        self.overlay.set_speed(value)
+        self._maybe_save_settings()
+
+    def _on_running(self, running: bool):
+        self.overlay.set_running(running)
+        self._maybe_save_settings()
+
+    def _on_clickthrough(self, enabled: bool):
+        self.overlay.set_click_through(enabled)
+        self._maybe_save_settings()
+
+    def _maybe_save_settings(self):
+        if getattr(self, "_loading_settings", False):
+            return
+        self._save_settings()
+
+    def _load_settings(self):
+        data = {}
+        try:
+            if self._settings_path.exists():
+                data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+
+        self._loading_settings = True
+        try:
+            if "speed" in data:
+                self.sld_speed.setValue(int(data.get("speed")))
+            if "visible" in data:
+                self.chk_visible.setChecked(bool(data.get("visible")))
+            if "running" in data:
+                self.chk_running.setChecked(bool(data.get("running")))
+            if "click_through" in data:
+                self.chk_clickthrough.setChecked(bool(data.get("click_through")))
+            if "right_to_left" in data:
+                self.chk_direction.setChecked(bool(data.get("right_to_left")))
+            if "projectile_color" in data:
+                self.txt_projectile_color.setText(str(data.get("projectile_color")))
+                self._on_projectile_color()
+        finally:
+            self._loading_settings = False
+
+        # Apply non-signal changes explicitly.
+        self._on_visible(self.chk_visible.isChecked())
+        self._on_running(self.chk_running.isChecked())
+        self._on_clickthrough(self.chk_clickthrough.isChecked())
+        self._on_direction_changed(self.chk_direction.isChecked())
+
+    def _save_settings(self):
+        data = {
+            "speed": int(self.sld_speed.value()),
+            "visible": bool(self.chk_visible.isChecked()),
+            "running": bool(self.chk_running.isChecked()),
+            "click_through": bool(self.chk_clickthrough.isChecked()),
+            "right_to_left": bool(self.chk_direction.isChecked()),
+            "projectile_color": self.txt_projectile_color.text().strip(),
+        }
+        try:
+            self._settings_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
     def _shoot(self):
         # Fire from a random cat (if overlay supports it); otherwise use overlay center.
@@ -2320,6 +2390,7 @@ class ControlPanel(QWidget):
             self._append_log(f"Shoot failed: {e}")
 
     def closeEvent(self, event):
+        self._save_settings()
         # Closing the control panel exits the app
         QApplication.instance().quit()
         event.accept()
@@ -2523,8 +2594,8 @@ if __name__ == "__main__":
 
     def _hotkey_shoot():
         # Fire from the sprite overlay's current center position.
-        center_local = QPoint(w.width() // 2, w.height() // 2)
-        center_global = w.mapToGlobal(center_local)
+        # center_local = QPoint(w.width() // 2, w.height() // 2)
+        center_global = w.random_cat_center_global()
         try:
             try:
                 w.pause_for_shot(350)
