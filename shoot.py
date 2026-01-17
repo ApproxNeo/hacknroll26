@@ -1,4 +1,5 @@
 import sys
+import json
 import socket
 import threading
 import uuid
@@ -417,6 +418,20 @@ class ControlPanel(QWidget):
         self.overlay.set_speed(self.sld_speed.value())
         self.overlay.set_click_through(self.chk_clickthrough.isChecked())
 
+    def _run_action(self, action_str: str):
+        action_json = action_str.strip()
+        try:
+            action_json = json.loads(action_json)
+        except Exception as e:
+            self._append_log(f"Invalid action JSON: {e}")
+            return
+        
+        if action_json["action"] == "fire":
+            x = action_json.get("x", 0)
+            y = action_json.get("y", 0)
+            self._append_log(f"Received 'fire' action at ({x}, {y})")
+            # Here you could add code to trigger an animation or effect on the overlay
+
     def _append_log(self, text: str):
         ts = QDateTime.currentDateTime().toString("HH:mm:ss")
         line = f"[{ts}] {text}"
@@ -462,6 +477,20 @@ def _first_ipv4(addresses: list[bytes]) -> str | None:
             return socket.inet_ntoa(a)
     return None
 
+
+# Auto-connect client to the first discovered peer (if not already connected).
+_connected_to: tuple[str, int] | None = None
+
+# When the cat is clicked, send a message through the client and server.
+def on_cat_clicked(global_pos: QPoint):
+    data = {"action": "fire", "x": global_pos.x(), "y": global_pos.y()}
+    
+    msg = json.dumps(data)
+    # Send to peers connected to our server
+    server.broadcast(msg)
+    # Send to a peer we connected to as a client
+    client.send(msg)
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
@@ -480,10 +509,8 @@ if __name__ == "__main__":
     zc = ZeroConfP2P(port=50505)
     zc.start()
 
-    # Auto-connect client to the first discovered peer (if not already connected).
-    _connected_to: tuple[str, int] | None = None
-
     def on_peer(name: str, host: str, port: int):
+        global _connected_to
         if _connected_to == (host, port):
             return
         _connected_to = (host, port)
@@ -493,14 +520,6 @@ if __name__ == "__main__":
 
     # Clean up zeroconf on exit.
     app.aboutToQuit.connect(zc.close)
-
-    # When the cat is clicked, send a message through the client and server.
-    def on_cat_clicked(global_pos: QPoint):
-        msg = f"CAT_CLICK at {global_pos.x()},{global_pos.y()}"
-        # Send to peers connected to our server
-        server.broadcast(msg)
-        # Send to a peer we connected to as a client
-        client.send(msg)
 
     w.clicked.connect(on_cat_clicked)
 
