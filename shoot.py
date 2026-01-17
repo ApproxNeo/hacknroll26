@@ -499,7 +499,7 @@ class CannonBallOverlay(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(24)
+        self._timer.start(16)
 
     def _set_center(self, p: QPoint):
         # Move widget so that its center sits on p.
@@ -609,7 +609,7 @@ class ProjectileOverlay(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(24)
+        self._timer.start(16)
 
     def _pos_at(self, t: float) -> QPoint:
         # Normalized projectile motion.
