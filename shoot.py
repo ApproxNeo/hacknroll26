@@ -6,7 +6,11 @@ import uuid
 import random
 import subprocess
 from pathlib import Path
-from PySide6.QtGui import QPainter, QPixmap, QMovie
+import math
+from PySide6.QtGui import QPainter, QPixmap, QMovie, QColor, QPen, QBrush, QPainterPath, QPolygon, QRegion
+from PySide6.QtCore import QRect
+
+from projectiles import ProjectileType, select_projectile_type, FlashbangOverlay, play_projectile_sound
 
 # Global hotkey (non-blocking). Uses pynput so keypresses still reach other apps.
 try:
@@ -19,20 +23,75 @@ except Exception:
 # Debounce global hotkey shots (avoid OS key repeat spam).
 _LAST_HOTKEY_SHOT_MS = 0
 BASE_DIR = Path(__file__).resolve().parent
-EXPLOSION_GIF = BASE_DIR / "explode.gif"
-EXPLOSION_MP3 = BASE_DIR / "explode.mp3"
-PROJECTILE_PNG = BASE_DIR / "projectile.png"
+ASSET_DIR = BASE_DIR / "assets"
+EXPLOSION_GIF = ASSET_DIR / "anims/explode.gif"
+EXPLOSION_MP3 = ASSET_DIR / "sounds/explode.mp3"
+PROJECTILE_PNG = ASSET_DIR / "sprites/projectile.png"
+SETTINGS_PATH = ASSET_DIR / "control_panel_settings.json"
 
 # Cache the projectile pixmap (and scaled variants) so paint events are cheap.
 _PROJECTILE_PIX: QPixmap = None
 _PROJECTILE_SCALED: dict[int, QPixmap] = {}
+_PROJECTILE_TINTED: dict[tuple[int, int], QPixmap] = {}
+
+# Default colors (customizable via control panel).
+_PROJECTILE_COLOR = QColor(110, 110, 110)
+
+
+def _parse_color(text: str) -> QColor:
+    if not text:
+        return None
+    raw = text.strip()
+    if not raw:
+        return None
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",")]
+        if len(parts) in (3, 4):
+            try:
+                r, g, b = (int(parts[0]), int(parts[1]), int(parts[2]))
+                a = int(parts[3]) if len(parts) == 4 else 255
+                c = QColor(r, g, b, a)
+                return c if c.isValid() else None
+            except Exception:
+                return None
+    c = QColor(raw)
+    return c if c.isValid() else None
+
+
+def _tint_pixmap(pix: QPixmap, color: QColor) -> QPixmap:
+    if pix is None or pix.isNull() or color is None or not color.isValid():
+        return pix
+    key = (int(pix.cacheKey()), int(color.rgba()))
+    cached = _PROJECTILE_TINTED.get(key)
+    if cached is not None and not cached.isNull():
+        return cached
+
+    tinted = QPixmap(pix.size())
+    tinted.setDevicePixelRatio(pix.devicePixelRatio())
+    tinted.fill(Qt.transparent)
+    painter = QPainter(tinted)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.drawPixmap(0, 0, pix)
+    painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    painter.fillRect(tinted.rect(), color)
+    painter.end()
+    _PROJECTILE_TINTED[key] = tinted
+    return tinted
 
 
 # Shooting direction configuration
 _SHOOT_DIRECTION: str = "left_to_right"  # "left_to_right" or "right_to_left"
 
 # Sprite scaling (1.0 = original frame size). Reduce to make the cat smaller.
+
 CAT_SCALE: float = 0.6
+
+# Visual insets (px) so the *drawn* cat appears flush to the screen edge.
+# The current cat drawing has significant transparent padding inside its 300x270 box.
+CAT_EDGE_INSET_TOP: int = 23
+CAT_EDGE_INSET_LEFT: int = 78
+CAT_EDGE_INSET_RIGHT: int = 78
+CAT_EDGE_INSET_BOTTOM: int = 0
 
 
 def _get_projectile_pixmap(target_size: int) -> QPixmap:
@@ -79,7 +138,6 @@ except Exception:
     _QT_AUDIO_AVAILABLE = False
 
 from zeroconf import Zeroconf, ServiceInfo, ServiceBrowser, ServiceStateChange
-
 
 class MessageServer(QObject):
     message_received = Signal(str)
@@ -151,6 +209,793 @@ class MessageServer(QObject):
             if text:
                 self.message_received.emit(text)
         sock._rx_buf = rx  # type: ignore[attr-defined]
+
+
+class Cat:
+    """Represents a single cat entity"""
+    # Edge constants
+    BOTTOM = 0
+    TOP = 1
+    LEFT = 2
+    RIGHT = 3
+
+    def __init__(self, x: int, y: int, edge: int = BOTTOM):
+        self.x = x
+        self.y = y
+        self.width = 300
+        self.height = 270
+        self.edge = edge  # Which edge the cat is on
+
+        # Movement state
+        self.speed = 5
+        self.facing = random.choice([1, -1])
+
+        # Jumping state
+        self.is_jumping = False
+        self.jump_vel = 0
+        self.gravity = 0.5
+        self.jump_cooldown = random.randint(1000, 4000)
+        self.hit_corner_this_jump = False  # Track if corner was hit during this jump
+
+        # Animation
+        self.anim_frame = 0
+
+        # Teleport timer
+        self.teleport_timer = random.randint(8000, 15000)
+
+    def update(self, screen_rect: QRect, speed_mag: int):
+        """Update cat position and physics"""
+        if speed_mag == 0:
+            return
+
+        self.speed = max(3, speed_mag)  # Ensure minimum speed
+        self.teleport_timer -= 16
+
+        # Ensure facing is never 0
+        if self.facing == 0:
+            self.facing = random.choice([1, -1])
+
+        # Update position based on edge
+        if self.edge == self.BOTTOM:
+            self._update_bottom_edge(screen_rect)
+        elif self.edge == self.TOP:
+            self._update_top_edge(screen_rect)
+        elif self.edge == self.LEFT:
+            self._update_left_edge(screen_rect)
+        elif self.edge == self.RIGHT:
+            self._update_right_edge(screen_rect)
+
+        # Force cats to stay within screen boundaries
+        self._clamp_to_screen(screen_rect)
+
+        # Check if cat went off screen and flip to random edge
+        self._ensure_on_screen(screen_rect)
+
+        # Teleport to random edge periodically
+        # if self.teleport_timer <= 0:
+        #     self._teleport_to_random_edge(screen_rect)
+        #     self.teleport_timer = random.randint(8000, 15000)
+
+    def _update_bottom_edge(self, screen_rect: QRect):
+        """Cat walking on bottom edge"""
+        ground_y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
+
+        if self.is_jumping:
+            self.jump_vel += self.gravity
+            new_y = self.y + self.jump_vel
+
+            # Check if jumped off top of screen
+            if new_y + self.height < screen_rect.top():
+                # Determine nearest wall based on x position
+                cat_center_x = self.x + self.width / 2
+                screen_center_x = (screen_rect.left() + screen_rect.right()) / 2
+
+                dist_to_left = cat_center_x - screen_rect.left()
+                dist_to_right = screen_rect.right() - cat_center_x
+                dist_to_top = abs(new_y - screen_rect.top())
+
+                # Find nearest wall
+                min_dist = min(dist_to_left, dist_to_right, dist_to_top)
+
+                if min_dist == dist_to_left:
+                    # Flip to left edge
+                    self.edge = Cat.LEFT
+                    self.x = screen_rect.left() - self.width
+                elif min_dist == dist_to_right:
+                    # Flip to right edge
+                    self.edge = Cat.RIGHT
+                    self.x = screen_rect.right() - self.width
+                else:
+                    # Flip to top edge
+                    self.edge = Cat.TOP
+                    self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
+
+                self.is_jumping = False
+                self.jump_vel = 0
+                self.hit_corner_this_jump = False
+                return
+
+            if new_y >= ground_y:
+                new_y = ground_y
+                self.is_jumping = False
+                self.jump_vel = 0
+                self.hit_corner_this_jump = False  # Reset on landing
+            self.y = new_y
+        else:
+            self.y = ground_y
+
+        self.x += self.speed * self.facing
+
+        if random.random() < 0.05:
+            self.facing = -self.facing  # Flip direction instead of random choice
+
+    def _update_top_edge(self, screen_rect: QRect):
+        """Cat walking upside down on top edge"""
+        ground_y = screen_rect.top() - CAT_EDGE_INSET_TOP
+
+        if self.is_jumping:
+            self.jump_vel += self.gravity
+            new_y = self.y - self.jump_vel
+
+            # Check if jumped off bottom of screen
+            if new_y > screen_rect.bottom():
+                # Determine nearest wall based on x position
+                cat_center_x = self.x + self.width / 2
+
+                dist_to_left = cat_center_x - screen_rect.left()
+                dist_to_right = screen_rect.right() - cat_center_x
+                dist_to_bottom = abs(new_y - screen_rect.bottom())
+
+                # Find nearest wall
+                min_dist = min(dist_to_left, dist_to_right, dist_to_bottom)
+
+                if min_dist == dist_to_left:
+                    # Flip to left edge
+                    self.edge = Cat.LEFT
+                    self.x = screen_rect.left() - self.width
+                elif min_dist == dist_to_right:
+                    # Flip to right edge
+                    self.edge = Cat.RIGHT
+                    self.x = screen_rect.right() - self.width
+                else:
+                    # Flip to bottom edge
+                    self.edge = Cat.BOTTOM
+                    self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
+
+                self.is_jumping = False
+                self.jump_vel = 0
+                self.hit_corner_this_jump = False
+                return
+
+            if new_y <= ground_y:
+                new_y = ground_y
+                self.is_jumping = False
+                self.jump_vel = 0
+                self.hit_corner_this_jump = False  # Reset on landing
+            self.y = new_y
+        else:
+            self.y = ground_y
+
+        self.x += self.speed * self.facing
+
+        # Check if walked off left or right side
+        if self.x + self.width < screen_rect.left():
+            # Walked off left side, spawn on left wall
+            self.edge = Cat.LEFT
+            self.x = screen_rect.left() - self.width
+        elif self.x > screen_rect.right():
+            # Walked off right side, spawn on right wall
+            self.edge = Cat.RIGHT
+            self.x = screen_rect.right() - self.width
+
+        if random.random() < 0.05:
+            self.facing = -self.facing  # Flip direction instead of random choice
+
+    def _update_left_edge(self, screen_rect: QRect):
+        """Cat walking on left edge"""
+        ground_x = screen_rect.left() - CAT_EDGE_INSET_LEFT
+
+        if self.is_jumping:
+            self.jump_vel += self.gravity
+            new_x = self.x + self.jump_vel
+
+            # Check if jumped off right side of screen
+            if new_x > screen_rect.right():
+                # Determine nearest wall based on y position
+                cat_center_y = self.y + self.height / 2
+
+                dist_to_top = cat_center_y - screen_rect.top()
+                dist_to_bottom = screen_rect.bottom() - cat_center_y
+                dist_to_right = abs(new_x - screen_rect.right())
+
+                # Find nearest wall
+                min_dist = min(dist_to_top, dist_to_bottom, dist_to_right)
+
+                if min_dist == dist_to_top:
+                    # Flip to top edge
+                    self.edge = Cat.TOP
+                    self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
+                elif min_dist == dist_to_bottom:
+                    # Flip to bottom edge
+                    self.edge = Cat.BOTTOM
+                    self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
+                else:
+                    # Flip to right edge
+                    self.edge = Cat.RIGHT
+                    self.x = (screen_rect.right() - self.width + 1) + CAT_EDGE_INSET_RIGHT
+
+                self.is_jumping = False
+                self.jump_vel = 0
+                self.hit_corner_this_jump = False
+                return
+
+            if new_x >= ground_x:
+                new_x = ground_x
+                self.is_jumping = False
+                self.jump_vel = 0
+                self.hit_corner_this_jump = False  # Reset on landing
+            self.x = new_x
+        else:
+            self.x = ground_x
+
+        self.y += self.speed * self.facing
+
+        # Check if walked off top or bottom
+        if self.y + self.height < screen_rect.top():
+            # Walked off top, spawn on top wall
+            self.edge = Cat.TOP
+            self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
+        elif self.y > screen_rect.bottom():
+            # Walked off bottom, spawn on bottom wall
+            self.edge = Cat.BOTTOM
+            self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
+
+        if random.random() < 0.05:
+            self.facing = -self.facing  # Flip direction instead of random choice
+
+    def _update_right_edge(self, screen_rect: QRect):
+        """Cat walking on right edge"""
+        ground_x = (screen_rect.right() - self.width + 1) + CAT_EDGE_INSET_RIGHT
+
+        if self.is_jumping:
+            self.jump_vel += self.gravity
+            new_x = self.x - self.jump_vel
+
+            # Check if jumped off left side of screen
+            if new_x + self.width < screen_rect.left():
+                # Determine nearest wall based on y position
+                cat_center_y = self.y + self.height / 2
+
+                dist_to_top = cat_center_y - screen_rect.top()
+                dist_to_bottom = screen_rect.bottom() - cat_center_y
+                dist_to_left = abs(new_x - screen_rect.left())
+
+                # Find nearest wall
+                min_dist = min(dist_to_top, dist_to_bottom, dist_to_left)
+
+                if min_dist == dist_to_top:
+                    # Flip to top edge
+                    self.edge = Cat.TOP
+                    self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
+                elif min_dist == dist_to_bottom:
+                    # Flip to bottom edge
+                    self.edge = Cat.BOTTOM
+                    self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
+                else:
+                    # Flip to left edge
+                    self.edge = Cat.LEFT
+                    self.x = screen_rect.left() - CAT_EDGE_INSET_LEFT
+
+                self.is_jumping = False
+                self.jump_vel = 0
+                self.hit_corner_this_jump = False
+                return
+
+            if new_x <= ground_x:
+                new_x = ground_x
+                self.is_jumping = False
+                self.jump_vel = 0
+                self.hit_corner_this_jump = False  # Reset on landing
+            self.x = new_x
+        else:
+            self.x = ground_x
+
+        self.y += self.speed * self.facing
+
+        # Check if walked off top or bottom
+        if self.y + self.height < screen_rect.top():
+            # Walked off top, spawn on top wall
+            self.edge = Cat.TOP
+            self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
+        elif self.y > screen_rect.bottom():
+            # Walked off bottom, spawn on bottom wall
+            self.edge = Cat.BOTTOM
+            self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
+
+        if random.random() < 0.05:
+            self.facing = -self.facing  # Flip direction instead of random choice
+
+    def hits_corner(self, screen_rect: QRect) -> bool:
+        """Check if jumping cat overlaps any screen corner"""
+        if not self.is_jumping or self.hit_corner_this_jump:
+            return False
+
+        corner_margin = 150  # Detection zone size
+        cat_rect = QRect(int(self.x), int(self.y), self.width, self.height)
+
+        # Define corner zones
+        top_left = QRect(screen_rect.left(), screen_rect.top(), corner_margin, corner_margin)
+        top_right = QRect(screen_rect.right() - corner_margin, screen_rect.top(), corner_margin, corner_margin)
+        bottom_left = QRect(screen_rect.left(), screen_rect.bottom() - corner_margin, corner_margin, corner_margin)
+        bottom_right = QRect(screen_rect.right() - corner_margin, screen_rect.bottom() - corner_margin, corner_margin, corner_margin)
+
+        if cat_rect.intersects(top_left) or cat_rect.intersects(top_right) or \
+           cat_rect.intersects(bottom_left) or cat_rect.intersects(bottom_right):
+            self.hit_corner_this_jump = True
+            return True
+        return False
+
+    def _flip_to_random_edge(self, screen_rect: QRect):
+        """Flip cat to a random edge when it goes off screen"""
+        self.edge = random.choice([self.BOTTOM, self.TOP, self.LEFT, self.RIGHT])
+
+        if self.edge == self.BOTTOM:
+            self.x = random.randint(screen_rect.left(), max(screen_rect.left(), screen_rect.right() - self.width))
+            self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
+        elif self.edge == self.TOP:
+            self.x = random.randint(screen_rect.left(), max(screen_rect.left(), screen_rect.right() - self.width))
+            self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
+        elif self.edge == self.LEFT:
+            self.x = screen_rect.left() - CAT_EDGE_INSET_LEFT
+            self.y = random.randint(screen_rect.top(), max(screen_rect.top(), screen_rect.bottom() - self.height))
+        elif self.edge == self.RIGHT:
+            self.x = (screen_rect.right() - self.width + 1) + CAT_EDGE_INSET_RIGHT
+            self.y = random.randint(screen_rect.top(), max(screen_rect.top(), screen_rect.bottom() - self.height))
+
+        self.facing = random.choice([1, -1])
+        self.reset_jump_state()
+
+    def _clamp_to_screen(self, screen_rect: QRect):
+        """Force cat position to stay within screen boundaries"""
+        # Base limits (Qt QRect right()/bottom() are inclusive, so +1 for max top-left).
+        min_x = screen_rect.left()
+        max_x = screen_rect.right() - self.width + 1
+        min_y = screen_rect.top()
+        max_y = screen_rect.bottom() - self.height + 1
+
+        # Allow small overscan so the visible cat (which is centered inside its box)
+        # can appear flush to the edges.
+        if self.edge == self.LEFT:
+            min_x -= CAT_EDGE_INSET_LEFT
+        elif self.edge == self.RIGHT:
+            max_x += CAT_EDGE_INSET_RIGHT
+
+        if self.edge == self.TOP:
+            min_y -= CAT_EDGE_INSET_TOP
+        elif self.edge == self.BOTTOM:
+            max_y += CAT_EDGE_INSET_BOTTOM
+
+        # Clamp X position
+        if self.x < min_x:
+            self.x = min_x
+        elif self.x > max_x:
+            self.x = max_x
+
+        # Clamp Y position
+        if self.y < min_y:
+            self.y = min_y
+        elif self.y > max_y:
+            self.y = max_y
+
+    def _ensure_on_screen(self, screen_rect: QRect):
+        """Check if cat went off screen and flip to random edge"""
+        off_screen = (
+            self.x + self.width < screen_rect.left() or
+            self.x > screen_rect.right() or
+            self.y + self.height < screen_rect.top() or
+            self.y > screen_rect.bottom()
+        )
+
+        # if off_screen:
+        #     self._flip_to_random_edge(screen_rect)
+
+    def _teleport_to_random_edge(self, screen_rect: QRect):
+        """Teleport cat to a random edge"""
+        self.edge = random.choice([self.BOTTOM, self.TOP, self.LEFT, self.RIGHT])
+
+        if self.edge == self.BOTTOM:
+            self.x = random.randint(screen_rect.left(), max(screen_rect.left(), screen_rect.right() - self.width))
+            self.y = (screen_rect.bottom() - self.height + 1) + CAT_EDGE_INSET_BOTTOM
+        elif self.edge == self.TOP:
+            self.x = random.randint(screen_rect.left(), max(screen_rect.left(), screen_rect.right() - self.width))
+            self.y = screen_rect.top() - CAT_EDGE_INSET_TOP
+        elif self.edge == self.LEFT:
+            self.x = screen_rect.left() - CAT_EDGE_INSET_LEFT
+            self.y = random.randint(screen_rect.top(), max(screen_rect.top(), screen_rect.bottom() - self.height))
+        elif self.edge == self.RIGHT:
+            self.x = (screen_rect.right() - self.width + 1) + CAT_EDGE_INSET_RIGHT
+            self.y = random.randint(screen_rect.top(), max(screen_rect.top(), screen_rect.bottom() - self.height))
+
+        self.facing = random.choice([1, -1])
+        self.reset_jump_state()
+
+    def reset_jump_state(self):
+        """Reset jumping and corner hit flags"""
+        self.is_jumping = False
+        self.jump_vel = 0
+        self.hit_corner_this_jump = False
+
+    def check_and_jump(self):
+        """Check if it's time to jump"""
+        self.jump_cooldown -= 100
+        if self.jump_cooldown <= 0 and not self.is_jumping:
+            if random.random() < 0.55:
+                self.jump_cooldown = random.randint(500, 1500)
+                self.is_jumping = True
+                # Jump direction depends on which edge the cat is on
+                jump_strength = random.randint(-20, -10)
+                if self.edge == Cat.BOTTOM:
+                    self.jump_vel = jump_strength  # Jump up (negative Y)
+                elif self.edge == Cat.TOP:
+                    self.jump_vel = jump_strength  # Jump down (negative Y becomes positive)
+                elif self.edge == Cat.LEFT:
+                    self.jump_vel = -jump_strength  # Jump right (invert to positive X)
+                elif self.edge == Cat.RIGHT:
+                    self.jump_vel = -jump_strength  # Jump left (invert to positive, then subtracted)
+
+    def update_anim(self):
+        """Update animation frame"""
+        if not self.is_jumping:
+            self.anim_frame = (self.anim_frame + 1) % 4
+
+
+class CatOverlay(QWidget):
+    from PySide6.QtCore import Signal
+    panel_requested = Signal(object)
+    cats_multiplied = Signal(int)
+    cat_killed = Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.cat_width = 300
+        self.cat_height = 270
+
+        self.setWindowFlags(
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint |
+            Qt.WindowDoesNotAcceptFocus |
+            Qt.NoDropShadowWindowHint
+        )
+
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, False)
+        self.setFocusPolicy(Qt.NoFocus)
+
+        screen = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen)
+
+        self.speed_mag = 5
+        self.click_through = True
+        self.cats = [Cat(0, screen.bottom(), Cat.BOTTOM)]
+        self.multiply_timer = random.randint(30000, 60000)
+        self.shutting_down = False
+
+        self.jump_timer = QTimer(self)
+        self.jump_timer.timeout.connect(self._check_jumps)
+        self.jump_timer.start(200)
+
+        self.anim_timer = QTimer(self)
+        self.anim_timer.timeout.connect(self._update_anim)
+        self.anim_timer.start(200)
+
+        self.move_timer = QTimer(self)
+        self.move_timer.timeout.connect(self.tick_move)
+        self.move_timer.start(16)  # ~60fps for smoother motion
+
+        self._update_window_mask()
+
+    def _update_window_mask(self):
+        """Update window mask so only cat areas are clickable"""
+        region = QRegion()
+        padding = 40  # Larger padding to avoid clipping after rotation
+        for cat in self.cats:
+            cat_rect = QRect(
+                int(cat.x) - padding,
+                int(cat.y) - padding,
+                cat.width + padding * 2,
+                cat.height + padding * 2
+            )
+            region = region.united(QRegion(cat_rect))
+        self.setMask(region)
+
+    def _check_jumps(self):
+        """Check and update jump state for all cats"""
+        if self.shutting_down:
+            return
+
+        self.multiply_timer -= 100
+
+        if self.multiply_timer <= 0:
+            self._multiply_cats()
+            self.multiply_timer = random.randint(30000, 60000)
+
+        for cat in self.cats:
+            cat.check_and_jump()
+
+    def _update_anim(self):
+        """Update animation for all cats"""
+        if self.shutting_down:
+            return
+
+        for cat in self.cats:
+            cat.update_anim()
+        self.update()
+
+    def _multiply_cats(self):
+        """Add a small number of new cats (non-exponential)"""
+        if self.shutting_down:
+            return
+
+        if len(self.cats) >= 3:
+            return
+
+        screen = self.geometry()
+        spawn_count = 1
+
+        new_cats = []
+        for _ in range(spawn_count):
+            base = random.choice(self.cats)
+            new_edge = Cat.BOTTOM # random.choice([Cat.BOTTOM, Cat.TOP, Cat.LEFT, Cat.RIGHT])
+            new_cat = Cat(
+                base.x + random.randint(-20, 20),
+                base.y + random.randint(-20, 20),
+                new_edge,
+            )
+            new_cats.append(new_cat)
+
+        self.cats.extend(new_cats)
+        self._update_window_mask()
+        self.cats_multiplied.emit(len(self.cats))
+
+    def set_speed(self, speed: int):
+        speed = max(0, int(speed))
+        self.speed_mag = speed if speed > 0 else 3
+
+    def set_click_through(self, enabled: bool):
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, bool(enabled))
+        self.click_through = enabled
+
+    def set_running(self, running: bool):
+        running = bool(running)
+        if running:
+            self.anim_timer.start()
+            self.move_timer.start(16)
+            self.jump_timer.start(200)
+        else:
+            self.anim_timer.stop()
+            self.move_timer.stop()
+            self.jump_timer.stop()
+
+    def tick_move(self):
+        """Update all cats and redraw"""
+        if self.speed_mag == 0 or self.shutting_down:
+            return
+
+        screen = self.geometry()
+
+        for cat in list(self.cats):
+            cat.update(screen, self.speed_mag)
+
+            if cat.hits_corner(screen):
+                self._multiply_cats()
+
+        self._update_window_mask()
+
+        self.update()
+
+    def random_cat_center_global(self) -> QPoint:
+        """Return the global center point of a random cat (fallback: overlay center)."""
+        try:
+            if not getattr(self, "cats", None):
+                return self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))
+            cat = random.choice(self.cats)
+            local = QPoint(int(cat.x + cat.width / 2), int(cat.y + cat.height / 2))
+            return self.mapToGlobal(local)
+        except Exception:
+            return self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))
+
+    def shutdown(self):
+        """Clean shutdown: stop timers, clear cats, close overlay"""
+        self.shutting_down = True
+        self.jump_timer.stop()
+        self.anim_timer.stop()
+        self.move_timer.stop()
+        self.cats.clear()
+        self.hide()
+        self.close()
+
+    def paintEvent(self, event):
+        """Draw all cats"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+        painter.setCompositionMode(QPainter.CompositionMode_Clear)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+        for cat in self.cats:
+            painter.save()
+
+            angle = 0
+            if cat.edge == Cat.TOP:
+                angle = 180
+            elif cat.edge == Cat.LEFT:
+                angle = 90
+            elif cat.edge == Cat.RIGHT:
+                angle = -90
+
+            cx = cat.x + self.cat_width / 2
+            cy = cat.y + self.cat_height / 2
+            painter.translate(cx, cy)
+            painter.rotate(angle)
+            painter.translate(-self.cat_width / 2, -self.cat_height / 2)
+
+            self._draw_cat(painter, cat)
+            painter.restore()
+
+    def _draw_cat(self, painter: QPainter, cat):
+        """
+        Draws a 'Chibi' style cat with 1:1 Head/Body proportions.
+        Expression: Unimpressed/Judging.
+        """
+        w, h = self.cat_width, self.cat_height
+
+        fur_color = QColor(255, 170, 80)
+        fur_shadow = QColor(215, 130, 40)
+        white = QColor(255, 255, 255)
+        skin_pink = QColor(255, 180, 190)
+        outline = QColor(60, 40, 20)
+
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(outline, 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+
+        breath = math.sin(cat.anim_frame * 0.15) * 2
+
+        cx, cy = w // 2, h // 2 + 10
+
+        painter.save()
+        if cat.facing < 0:
+            painter.translate(w, 0)
+            painter.scale(-1, 1)
+            cx = w // 2
+
+        tail_path = QPainterPath()
+        tail_start = QPoint(cx - 25, cy + 30)
+        tail_swish = math.sin(cat.anim_frame * 0.2) * 10
+
+        tail_path.moveTo(tail_start)
+        tail_path.cubicTo(
+            cx - 50, cy + 30,
+            cx - 60, cy - 20 + tail_swish,
+            cx - 30, cy - 40 + tail_swish
+        )
+
+        painter.setBrush(Qt.NoBrush)
+        tail_pen = QPen(outline, 14, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(tail_pen)
+        painter.drawPath(tail_path)
+
+        tail_pen.setColor(fur_color)
+        tail_pen.setWidth(9)
+        painter.setPen(tail_pen)
+        painter.drawPath(tail_path)
+
+        painter.setPen(QPen(outline, 2.5))
+
+        body_w, body_h = 50, 45
+        body_y = cy + 15
+
+        painter.setBrush(QBrush(fur_color))
+        body_path = QPainterPath()
+        body_path.addRoundedRect(QRect(int(cx - body_w/2), int(body_y), int(body_w), int(body_h)), 20, 20)
+        painter.drawPath(body_path)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(white))
+        painter.drawEllipse(int(cx - 15), int(body_y + 10), 30, 25)
+
+        painter.setPen(QPen(outline, 2.5))
+
+        head_w, head_h = 80, 70
+        head_x = cx - head_w // 2
+        head_y = cy - 45 + breath
+
+        painter.setBrush(QBrush(fur_color))
+
+        ear_l = QPolygon([
+            QPoint(int(cx - 30), int(head_y + 10)),
+            QPoint(int(cx - 38), int(head_y - 15)),
+            QPoint(int(cx - 15), int(head_y + 5))
+        ])
+        painter.drawPolygon(ear_l)
+
+        ear_r = QPolygon([
+            QPoint(int(cx + 30), int(head_y + 10)),
+            QPoint(int(cx + 38), int(head_y - 15)),
+            QPoint(int(cx + 15), int(head_y + 5))
+        ])
+        painter.drawPolygon(ear_r)
+
+        head_rect = QRect(int(head_x), int(head_y), int(head_w), int(head_h))
+        painter.setBrush(QBrush(fur_color))
+        painter.drawRoundedRect(head_rect, 30, 30)
+
+        eye_y = head_y + 28
+        eye_offset = 18
+        eye_size = 14
+
+        painter.setBrush(QBrush(white))
+        painter.drawEllipse(int(cx - eye_offset - eye_size/2), int(eye_y), eye_size, eye_size)
+        painter.drawEllipse(int(cx + eye_offset - eye_size/2), int(eye_y), eye_size, eye_size)
+
+        painter.setBrush(QBrush(outline))
+        painter.drawEllipse(int(cx - eye_offset - 2), int(eye_y + 4), 4, 4)
+        painter.drawEllipse(int(cx + eye_offset - 2), int(eye_y + 4), 4, 4)
+
+        painter.setBrush(QBrush(fur_color))
+        painter.setPen(QPen(outline, 2.5))
+
+        painter.drawLine(int(cx - eye_offset - 8), int(eye_y + 2), int(cx - eye_offset + 8), int(eye_y + 2))
+        painter.drawLine(int(cx + eye_offset - 8), int(eye_y + 2), int(cx + eye_offset + 8), int(eye_y + 2))
+
+        painter.setBrush(QBrush(skin_pink))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(int(cx - 3), int(eye_y + 12), 6, 4)
+
+        painter.setPen(QPen(outline, 2))
+        painter.setBrush(Qt.NoBrush)
+        mouth_y = eye_y + 18
+
+        mouth_path = QPainterPath()
+        mouth_path.moveTo(cx - 5, mouth_y)
+        mouth_path.quadTo(cx - 2.5, mouth_y + 3, cx, mouth_y)
+        mouth_path.quadTo(cx + 2.5, mouth_y + 3, cx + 5, mouth_y)
+        painter.drawPath(mouth_path)
+
+        painter.setPen(QPen(outline, 2.5))
+        painter.setBrush(QBrush(white))
+
+        paw_y = body_y + 15 + breath
+        painter.drawEllipse(int(cx - 15), int(paw_y), 12, 12)
+        painter.drawEllipse(int(cx + 3), int(paw_y), 12, 12)
+
+        foot_y = body_y + body_h - 8
+        painter.setBrush(QBrush(white))
+        painter.drawEllipse(int(cx - 20), int(foot_y), 14, 10)
+        painter.drawEllipse(int(cx + 6), int(foot_y), 14, 10)
+
+        painter.restore()
+
+    def mousePressEvent(self, event):
+        """Handle clicks on cats"""
+        click_pos = event.position().toPoint()
+        for cat in self.cats:
+            cat_rect = QRect(int(cat.x), int(cat.y), cat.width, cat.height)
+            if cat_rect.contains(click_pos):
+                self.panel_requested.emit(cat)
+                event.accept()
+                return
+
+    def kill_cat(self, cat):
+        """Remove a specific cat from the overlay"""
+        if cat in self.cats:
+            self.cats.remove(cat)
+            self._update_window_mask()
+            self.cats_multiplied.emit(len(self.cats))
 
 
 class MessageClient(QObject):
@@ -277,274 +1122,6 @@ class ZeroConfP2P(QObject):
         threading.Thread(target=_resolve, daemon=True).start()
 
 
-class SpriteOverlay(QWidget):
-    clicked = Signal(QPoint)
-
-    def __init__(self, frames: list[QPixmap], fps: int = 12):
-        super().__init__()
-        # Keep original frames (facing right) and build mirrored frames (facing left).
-        self.frames_right = frames
-        self.frames_left = [QPixmap.fromImage(f.toImage().mirrored(True, False)) for f in frames]
-
-        # Direction: 1 = right, -1 = left
-        self._dir = 1
-        self.frames = self.frames_right
-        self.frame_i = 0
-
-        # "Windowless" look: no title bar/borders; transparent background; stays on top
-        self.setWindowFlags(
-            Qt.FramelessWindowHint |
-            Qt.WindowStaysOnTopHint |
-            Qt.WindowDoesNotAcceptFocus |
-            Qt.NoDropShadowWindowHint
-        )
-
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setAutoFillBackground(False)
-        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setFocusPolicy(Qt.NoFocus)
-
-        # Optional click-through
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setMouseTracking(True)
-
-        # Size to first frame
-        self.resize(self.frames[0].size())
-
-        # Animation timer
-        self.anim_timer = QTimer(self)
-        self.anim_timer.timeout.connect(self.next_frame)
-        self.anim_timer.start(max(1, int(1000 / fps)))
-
-        # Horizontal-only ground movement + occasional jumps.
-        self._speed = 3
-        self._vel_x = self._dir * self._speed  # pixels per tick (~60Hz)
-
-        self._jumping = False
-        self._y = float(self.y())
-        self._vy = 0.0  # pixels / second
-        self._gravity = 1800.0  # pixels / second^2
-        self._ground_margin = 10  # pixels above bottom of available geometry
-
-        self._last_tick_ms = QDateTime.currentMSecsSinceEpoch()
-        self._next_jump_ms = 0
-        self._schedule_next_jump()
-
-        # Occasional random direction changes (not only at screen edges).
-        self._next_turn_ms = 0
-        self._schedule_next_turn()
-
-        self.move_timer = QTimer(self)
-        self.move_timer.timeout.connect(self.tick_move)
-        self.move_timer.start(16)  # ~60Hz
-
-        # Shot-pause state (supports rapid successive shots by extending the pause).
-        self._running = True
-        self._shot_pause_until_ms = 0
-        self._was_moving_before_shot = False
-        self._shot_pause_timer = QTimer(self)
-        self._shot_pause_timer.setSingleShot(True)
-        self._shot_pause_timer.timeout.connect(self._resume_after_shot)
-
-    def set_fps(self, fps: int):
-        fps = max(1, int(fps))
-        self.anim_timer.start(max(1, int(1000 / fps)))
-
-    def set_speed(self, speed: int):
-        speed = max(0, int(speed))
-        self._speed = speed
-        self._vel_x = (1 if getattr(self, "_dir", 1) >= 0 else -1) * speed
-
-    def set_click_through(self, enabled: bool):
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, bool(enabled))
-
-    def set_running(self, running: bool):
-        running = bool(running)
-        self._running = running
-        if running:
-            if not self.anim_timer.isActive():
-                self.anim_timer.start()
-            if not self.move_timer.isActive():
-                self.move_timer.start(16)
-        else:
-            self.anim_timer.stop()
-            self.move_timer.stop()
-
-    def next_frame(self):
-        self.frame_i = (self.frame_i + 1) % len(self.frames)
-        self.update()
-
-    def tick_move(self):
-        # Use the screen we're currently on (or primary).
-        screen = QApplication.screenAt(self.pos()) or QApplication.primaryScreen()
-        geo = screen.availableGeometry() if screen else QApplication.primaryScreen().availableGeometry()
-
-        # Ground Y (top-left widget coordinates).
-        ground_y = int(geo.bottom() - self.height() - self._ground_margin)
-
-        now_ms = QDateTime.currentMSecsSinceEpoch()
-        dt = (now_ms - getattr(self, "_last_tick_ms", now_ms)) / 1000.0
-        self._last_tick_ms = now_ms
-        # Clamp dt to avoid huge jumps after pauses.
-        if dt <= 0.0:
-            dt = 0.016
-        elif dt > 0.05:
-            dt = 0.05
-
-        # Randomly flip direction at occasional times (while away from edges).
-        # This gives the cat more "alive" movement rather than only bouncing.
-        if getattr(self, "_speed", 0) > 0 and now_ms >= getattr(self, "_next_turn_ms", 0):
-            edge_margin = 48  # px
-            within_edges = (self.x() > geo.left() + edge_margin) and (self.x() < (geo.right() - self.width() - edge_margin))
-            if within_edges:
-                self._set_direction(-getattr(self, "_dir", 1))
-            self._schedule_next_turn()
-
-        # Horizontal movement.
-        x = int(self.x() + getattr(self, "_vel_x", 0))
-
-        # Bounce at edges and flip direction when bouncing.
-        min_x = int(geo.left())
-        max_x = int(geo.right() - self.width() + 1)
-        if x < min_x:
-            x = min_x
-            self._set_direction(1)
-        elif x > max_x:
-            x = max_x
-            self._set_direction(-1)
-
-        # Occasional jump trigger.
-        if not self._jumping and now_ms >= getattr(self, "_next_jump_ms", 0):
-            self._start_jump(ground_y)
-            self._schedule_next_jump()
-
-        # Vertical movement (jump physics).
-        if self._jumping:
-            self._y += self._vy * dt
-            self._vy += self._gravity * dt
-            if self._y >= ground_y:
-                # Land.
-                self._y = float(ground_y)
-                self._jumping = False
-                self._vy = 0.0
-        else:
-            # Stick to ground.
-            self._y = float(ground_y)
-
-        self.move(int(x), int(round(self._y)))
-    def _set_direction(self, dir_sign: int):
-        """Update direction and flip frames when changing direction."""
-        dir_sign = 1 if dir_sign >= 0 else -1
-        if dir_sign == getattr(self, "_dir", 1):
-            return
-        self._dir = dir_sign
-        # Keep horizontal speed magnitude.
-        mag = abs(getattr(self, "_vel_x", 0)) or abs(getattr(self, "_speed", 3))
-        self._vel_x = self._dir * mag
-
-        # Swap frame set (flip).
-        self.frames = self.frames_right if self._dir == 1 else self.frames_left
-        self.frame_i = self.frame_i % len(self.frames)
-        self.update()
-
-    def _schedule_next_jump(self):
-        now = QDateTime.currentMSecsSinceEpoch()
-        # Occasional jumps: roughly every 1.2s–4.5s.
-        self._next_jump_ms = now + random.randint(1200, 4500)
-
-    def _schedule_next_turn(self):
-        now = QDateTime.currentMSecsSinceEpoch()
-        # Occasional random turns: roughly every 2.5s–8.0s.
-        self._next_turn_ms = now + random.randint(2500, 8000)
-
-    def _start_jump(self, ground_y: int):
-        if getattr(self, "_jumping", False):
-            return
-        self._jumping = True
-        self._y = float(ground_y)
-        # Negative vy => upward. Tune range for a noticeable but not huge jump.
-        self._vy = -random.uniform(650.0, 950.0)
-
-    def pause_for_shot(self, ms: int = 350):
-        """Pause movement briefly when shooting.
-
-        Supports rapid successive shots by extending the pause window.
-        """
-        return # Disabled for now
-        ms = max(0, int(ms))
-        now = QDateTime.currentMSecsSinceEpoch()
-
-        # If we're not already in a pause window, capture whether we should resume later.
-        if now >= getattr(self, "_shot_pause_until_ms", 0):
-            self._was_moving_before_shot = bool(self.move_timer.isActive())
-
-        # Extend the pause window.
-        new_until = max(getattr(self, "_shot_pause_until_ms", 0), now + ms)
-        self._shot_pause_until_ms = new_until
-
-        # Stop movement timer during the pause.
-        try:
-            self.move_timer.stop()
-        except Exception:
-            pass
-
-        # Schedule (or reschedule) the resume check for the remaining time.
-        remaining = max(0, int(new_until - now))
-        try:
-            self._shot_pause_timer.start(remaining)
-        except Exception:
-            pass
-
-    def _resume_after_shot(self):
-        now = QDateTime.currentMSecsSinceEpoch()
-        until = getattr(self, "_shot_pause_until_ms", 0)
-
-        # If another shot extended the pause, wait again.
-        if now < until:
-            try:
-                self._shot_pause_timer.start(int(until - now))
-            except Exception:
-                pass
-            return
-
-        # Resume only if the user still wants movement running.
-        if getattr(self, "_running", True) and getattr(self, "_was_moving_before_shot", False):
-            try:
-                self.move_timer.start(16)
-            except Exception:
-                pass
-
-        self._was_moving_before_shot = False
-
-    def paintEvent(self, _):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-
-        # Explicitly clear the backing store to avoid a 1px outline artifact on macOS.
-        painter.setCompositionMode(QPainter.CompositionMode_Source)
-        painter.fillRect(self.rect(), Qt.transparent)
-        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-
-        painter.drawPixmap(0, 0, self.frames[self.frame_i])
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            # Stop moving briefly while shooting.
-            try:
-                self.pause_for_shot(350)
-            except Exception:
-                pass
-
-            # Use the sprite's center as the "cat position".
-            center_local = QPoint(self.width() // 2, self.height() // 2)
-            center_global = self.mapToGlobal(center_local)
-            self.clicked.emit(center_global)
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-
 class GifOverlay(QWidget):
     finished = Signal()
 
@@ -648,7 +1225,7 @@ class GifOverlay(QWidget):
 class CannonBallOverlay(QWidget):
     finished = Signal(QPoint)  # emits landing position
 
-    def __init__(self, start_pos: QPoint, end_pos: QPoint, duration_ms: int = 900, radius: int = 10, arc_height: int = 220):
+    def __init__(self, start_pos: QPoint, end_pos: QPoint, duration_ms: int = 900, radius: int = 10, arc_height: int = 220, *, color: QColor = None):
         super().__init__()
         self.setWindowFlags(
             Qt.FramelessWindowHint |
@@ -668,6 +1245,7 @@ class CannonBallOverlay(QWidget):
         self._duration = max(100, int(duration_ms))
         self._radius = max(2, int(radius))
         self._arc = int(arc_height)
+        self._color = QColor(color) if color is not None else QColor(_PROJECTILE_COLOR)
 
         # Widget size is just big enough to draw the projectile.
         d = self._radius * 6 + 2
@@ -708,6 +1286,12 @@ class CannonBallOverlay(QWidget):
 
         self._set_center(QPoint(int(x), int(y)))
 
+    def set_color(self, color: QColor):
+        if color is None or not color.isValid():
+            return
+        self._color = QColor(color)
+        self.update()
+
     def paintEvent(self, _):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -719,19 +1303,21 @@ class CannonBallOverlay(QWidget):
 
         # Draw the projectile image if available; otherwise fall back to a simple cannonball.
         if getattr(self, "_pix", None) is not None and not self._pix.isNull():
-            x = (self.width() - self._pix.width()) // 2
-            y = (self.height() - self._pix.height()) // 2
-            painter.drawPixmap(int(x), int(y), self._pix)
+            pix = _tint_pixmap(self._pix, self._color)
+            x = (self.width() - pix.width()) // 2
+            y = (self.height() - pix.height()) // 2
+            painter.drawPixmap(int(x), int(y), pix)
         else:
             r = self._radius
             cx = self.width() // 2
             cy = self.height() // 2
 
             painter.setPen(Qt.NoPen)
-            painter.setBrush(Qt.gray)
+            base = self._color if self._color is not None else QColor(Qt.gray)
+            painter.setBrush(base)
             painter.drawEllipse(QPoint(cx, cy), r, r)
 
-            painter.setBrush(Qt.white)
+            painter.setBrush(base.lighter(160))
             painter.setOpacity(0.25)
             painter.drawEllipse(
                 QPoint(cx - max(2, r // 3), cy - max(2, r // 3)),
@@ -757,6 +1343,7 @@ class ProjectileOverlay(QWidget):
         t_end: float,
         *,
         radius: int = 10,
+        color: QColor = None,
     ):
         super().__init__()
         self.setWindowFlags(
@@ -779,6 +1366,7 @@ class ProjectileOverlay(QWidget):
         self._vy = float(vy)
         self._g = float(g)
         self._t_end = max(0.0, float(t_end))
+        self._color = QColor(color) if color is not None else QColor(_PROJECTILE_COLOR)
 
         self._radius = max(2, int(radius))
         d = self._radius * 4 + 2
@@ -819,6 +1407,12 @@ class ProjectileOverlay(QWidget):
 
         self._set_center(self._pos_at(t))
 
+    def set_color(self, color: QColor):
+        if color is None or not color.isValid():
+            return
+        self._color = QColor(color)
+        self.update()
+
     def paintEvent(self, _):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -829,19 +1423,21 @@ class ProjectileOverlay(QWidget):
 
         # Draw the projectile image if available; otherwise fall back to a simple ball.
         if getattr(self, "_pix", None) is not None and not self._pix.isNull():
-            x = (self.width() - self._pix.width()) // 2
-            y = (self.height() - self._pix.height()) // 2
-            painter.drawPixmap(int(x), int(y), self._pix)
+            pix = _tint_pixmap(self._pix, self._color)
+            x = (self.width() - pix.width()) // 2
+            y = (self.height() - pix.height()) // 2
+            painter.drawPixmap(int(x), int(y), pix)
         else:
             r = self._radius
             cx = self.width() // 2
             cy = self.height() // 2
 
             painter.setPen(Qt.NoPen)
-            painter.setBrush(Qt.gray)
+            base = self._color if self._color is not None else QColor(Qt.gray)
+            painter.setBrush(base)
             painter.drawEllipse(QPoint(cx, cy), r, r)
 
-            painter.setBrush(Qt.white)
+            painter.setBrush(base.lighter(160))
             painter.setOpacity(0.25)
             painter.drawEllipse(
                 QPoint(cx - max(2, r // 3), cy - max(2, r // 3)),
@@ -859,6 +1455,23 @@ _active_explosions: list[GifOverlay] = []
 _MAX_ACTIVE_CANNONBALLS = 10
 _MAX_ACTIVE_PROJECTILES = 16
 _MAX_ACTIVE_EXPLOSIONS = 12
+
+
+def set_projectile_color(color: QColor):
+    global _PROJECTILE_COLOR
+    if color is None or not color.isValid():
+        return
+    _PROJECTILE_COLOR = QColor(color)
+    for ov in list(_active_projectiles):
+        try:
+            ov.set_color(_PROJECTILE_COLOR)
+        except Exception:
+            pass
+    for ov in list(_active_cannonballs):
+        try:
+            ov.set_color(_PROJECTILE_COLOR)
+        except Exception:
+            pass
 
 
 def _drop_oldest(overlays: list):
@@ -885,10 +1498,32 @@ def _drop_oldest(overlays: list):
 _EXPLODE_PROCS: list[subprocess.Popen] = []
 _EXPLODE_MAX_SIMULTANEOUS = 4
 
-_SFX_READY = False
+_SFX_READY = True
 _SFX_PLAYERS = []  # list[QMediaPlayer]
 _SFX_AUDIO = []    # list[QAudioOutput]
 _SFX_RR = 0
+
+# If QtMultimedia backend is broken on this system (common on some Linux/PipeWire setups),
+# disable it at runtime and fall back to OS playback.
+_QT_SFX_DISABLED = False
+_QT_SFX_DISABLE_REASON = ""
+
+
+def _disable_qt_sfx(reason: str):
+    global _QT_SFX_DISABLED, _QT_SFX_DISABLE_REASON
+    if _QT_SFX_DISABLED:
+        return
+    _QT_SFX_DISABLED = True
+    _QT_SFX_DISABLE_REASON = str(reason or "")
+    try:
+        # Best-effort: stop any players so we don't hang on a broken backend.
+        for p in list(_SFX_PLAYERS):
+            try:
+                p.stop()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _preload_explosion_sound() -> bool:
@@ -911,6 +1546,15 @@ def _preload_explosion_sound() -> bool:
             p = QMediaPlayer()
             p.setAudioOutput(out)
             p.setSource(url)
+
+            # If the backend errors (e.g. PipeWire sync timeouts), disable Qt SFX and fall back.
+            try:
+                # PySide6: errorOccurred(QMediaPlayer.Error, str)
+                p.errorOccurred.connect(lambda err, err_str, _p=p: _disable_qt_sfx(f"QMediaPlayer error: {err_str}"))
+            except Exception:
+                # Some builds expose different signal shapes; ignore and rely on try/except in play.
+                pass
+
             _SFX_AUDIO.append(out)
             _SFX_PLAYERS.append(p)
 
@@ -935,7 +1579,7 @@ def _play_explosion_sound():
         return
 
     # Low-latency path: QtMultimedia
-    if _preload_explosion_sound() and _SFX_PLAYERS:
+    if (not _QT_SFX_DISABLED) and _preload_explosion_sound() and _SFX_PLAYERS:
         try:
             # Round-robin: always play on the next player, restarting if currently playing.
             p = _SFX_PLAYERS[_SFX_RR % len(_SFX_PLAYERS)]
@@ -950,9 +1594,9 @@ def _play_explosion_sound():
                 pass
             p.play()
             return
-        except Exception:
-            # If QtMultimedia fails at runtime, drop through to OS fallback.
-            pass
+        except Exception as e:
+            # If QtMultimedia fails at runtime, disable it and drop through to OS fallback.
+            _disable_qt_sfx(f"QtMultimedia play failed: {e}")
 
     # Fallback: spawn an OS player process (higher latency)
     try:
@@ -981,7 +1625,7 @@ def _play_explosion_sound():
             )
         else:
             # Linux / others: try common players or xdg-open.
-            for cmd in (["paplay"], ["aplay"], ["ffplay", "-nodisp", "-autoexit"], ["xdg-open"]):
+            for cmd in (["paplay"], ["pw-play"], ["aplay"], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error"], ["xdg-open"]):
                 try:
                     proc = subprocess.Popen(
                         cmd + [str(EXPLOSION_MP3)],
@@ -996,7 +1640,6 @@ def _play_explosion_sound():
             _EXPLODE_PROCS.append(proc)
     except Exception:
         pass
-
 
 def show_explosion(global_pos: QPoint) -> str:
     gif_path = EXPLOSION_GIF
@@ -1195,6 +1838,7 @@ def shoot_projectile_remote_arrive_left(
     land_nx: float = None,
     land_ny: float = None,
     entry_ny: float = 0.5,
+    color: QColor = None,
 ) -> str:
     """Remote projectile arriving from the left edge (left-to-right shooting).
 
@@ -1247,9 +1891,20 @@ def shoot_projectile_remote_arrive_left(
     if t_land <= 0.05:
         t_land = 0.05
 
+    # If the projectile would "land" before it ever becomes visible on this screen,
+    # don't spawn it and (critically) don't explode.
+    t_enter = (0.0 - x0) / vx  # x crosses 0.0 (enters the screen)
+    t_exit_screen = (x_exit - x0) / vx  # x reaches the sender's exit point on this screen
+    if t_land <= t_enter:
+        return None
+
+    # If it would land offscreen (after it has already exited), let it just fly across
+    # and disappear at the screen-exit point; no explosion.
+    t_end = min(t_land, t_exit_screen)
+
     def _spawn():
         try:
-            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_land)
+            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_end, color=color)
         except Exception as e:
             try:
                 print(f"Failed to start remote projectile: {e}")
@@ -1261,7 +1916,13 @@ def shoot_projectile_remote_arrive_left(
             _drop_oldest(_active_projectiles)
         _active_projectiles.append(proj)
         proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
-        proj.finished.connect(lambda p: show_explosion(p))
+
+        def _maybe_explode(p: QPoint, *, _geo=geo, _t_end=t_end, _t_land=t_land):
+            # Only explode if the projectile actually lands on this screen (not offscreen).
+            if _t_end >= (_t_land - 1e-6) and _geo.contains(p):
+                show_explosion(p)
+
+        proj.finished.connect(_maybe_explode)
         proj.show()
 
     QTimer.singleShot(int(start_delay_ms), _spawn)
@@ -1270,6 +1931,12 @@ def shoot_projectile_remote_arrive_left(
 
 def shoot_projectile_local_exit_left(start_global_pos: QPoint, vx: float, vy: float, g: float) -> str:
     """Shoot projectile from right to left, exiting left edge."""
+
+    # Apply speed multiplier
+    ptype = select_projectile_type()
+    speed_mult = ptype.speed_multiplier
+    vx = vx * speed_mult
+
     geo = _screen_geo_for_pos(start_global_pos)
     sx, sy = _norm_point(start_global_pos)
 
@@ -1306,6 +1973,7 @@ def shoot_projectile_remote_arrive_right(
     land_nx: float = None,
     land_ny: float = None,
     entry_ny: float = 0.5,
+    color: QColor = None,
 ) -> str:
     """Remote projectile arriving from the right edge (right-to-left shooting).
 
@@ -1358,9 +2026,20 @@ def shoot_projectile_remote_arrive_right(
     if t_land <= 0.05:
         t_land = 0.05
 
+    # If the projectile would "land" before it ever becomes visible on this screen,
+    # don't spawn it and (critically) don't explode.
+    t_enter = (1.0 - x0) / vx  # x crosses 1.0 (enters the screen from the right)
+    t_exit_screen = (x_exit - x0) / vx  # x reaches the sender's exit point on this screen
+    if t_land <= t_enter:
+        return None
+
+    # If it would land offscreen (after it has already exited), let it just fly across
+    # and disappear at the screen-exit point; no explosion.
+    t_end = min(t_land, t_exit_screen)
+
     def _spawn():
         try:
-            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_land)
+            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_end, color=color)
         except Exception as e:
             try:
                 print(f"Failed to start remote projectile: {e}")
@@ -1372,7 +2051,13 @@ def shoot_projectile_remote_arrive_right(
             _drop_oldest(_active_projectiles)
         _active_projectiles.append(proj)
         proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
-        proj.finished.connect(lambda p: show_explosion(p))
+
+        def _maybe_explode(p: QPoint, *, _geo=geo, _t_end=t_end, _t_land=t_land):
+            # Only explode if the projectile actually lands on this screen (not offscreen).
+            if _t_end >= (_t_land - 1e-6) and _geo.contains(p):
+                show_explosion(p)
+
+        proj.finished.connect(_maybe_explode)
         proj.show()
 
     QTimer.singleShot(int(start_delay_ms), _spawn)
@@ -1416,7 +2101,7 @@ def shoot_cannon_to(
 
 
 class ControlPanel(QWidget):
-    def __init__(self, overlay: SpriteOverlay, server: MessageServer, client: MessageClient):
+    def __init__(self, overlay: CatOverlay, server: MessageServer, client: MessageClient):
         super().__init__()
         self.overlay = overlay
         self.server = server
@@ -1433,10 +2118,10 @@ class ControlPanel(QWidget):
         self.sld_speed.setRange(0, 30)
         # default from current velocity magnitude
         self.sld_speed.setValue(abs(getattr(self.overlay, "_vel_x", 0)) or 3)
-        self.sld_speed.valueChanged.connect(self.overlay.set_speed)
+        self.sld_speed.valueChanged.connect(self._on_speed_changed)
         speed_row.addWidget(self.sld_speed)
         root.addLayout(speed_row)
-    
+
         # Visibility
         self.chk_visible = QCheckBox("Show sprite overlay")
         self.chk_visible.setChecked(True)
@@ -1446,13 +2131,13 @@ class ControlPanel(QWidget):
         # Running
         self.chk_running = QCheckBox("Animate / move")
         self.chk_running.setChecked(True)
-        self.chk_running.toggled.connect(self.overlay.set_running)
+        self.chk_running.toggled.connect(self._on_running)
         root.addWidget(self.chk_running)
 
         # Click-through
         self.chk_clickthrough = QCheckBox("Click-through overlay")
         self.chk_clickthrough.setChecked(True)
-        self.chk_clickthrough.toggled.connect(self.overlay.set_click_through)
+        self.chk_clickthrough.toggled.connect(self._on_clickthrough)
         root.addWidget(self.chk_clickthrough)
 
         # Shooting direction
@@ -1460,7 +2145,17 @@ class ControlPanel(QWidget):
         self.chk_direction.setChecked(False)
         self.chk_direction.toggled.connect(self._on_direction_changed)
         root.addWidget(self.chk_direction)
-        
+
+        # Color customization
+        projectile_color_row = QHBoxLayout()
+        projectile_color_row.addWidget(QLabel("Projectile/Cannon color"))
+        self.txt_projectile_color = QLineEdit()
+        self.txt_projectile_color.setPlaceholderText("#RRGGBB / #RRGGBBAA / name / r,g,b")
+        self.txt_projectile_color.setText(_PROJECTILE_COLOR.name(QColor.HexRgb))
+        self.txt_projectile_color.editingFinished.connect(self._on_projectile_color)
+        projectile_color_row.addWidget(self.txt_projectile_color)
+        root.addLayout(projectile_color_row)
+
         # Shoot config
         shoot_row = QHBoxLayout()
         self.btn_shoot = QPushButton("Shoot")
@@ -1494,6 +2189,9 @@ class ControlPanel(QWidget):
         root.addLayout(btn_row)
 
         # Apply initial settings
+        self._loading_settings = False
+        self._settings_path = SETTINGS_PATH
+        self._load_settings()
         self.overlay.set_speed(self.sld_speed.value())
         self.overlay.set_click_through(self.chk_clickthrough.isChecked())
 
@@ -1506,6 +2204,10 @@ class ControlPanel(QWidget):
             return
 
         action = action_json.get("action")
+
+        if action == "cannon":
+            # Parse remote color override if present (applies only to received projectile).
+            color = _parse_color(action_json.get("projectile_color", ""))
 
         if action == "fire":
             x = action_json.get("x", 0)
@@ -1534,13 +2236,14 @@ class ControlPanel(QWidget):
                 direction = action_json.get("direction", "left_to_right")
                 land_nx = action_json.get("land_nx", None)
                 land_ny = action_json.get("land_ny", None)
-                
+
                 if direction == "right_to_left":
                     err = shoot_projectile_remote_arrive_right(
                         sx, sy, vx, vy, g,
                         start_delay_ms=delay_ms,
                         land_nx=land_nx,
                         land_ny=land_ny,
+                        color=color,
                     )
                     if err:
                         self._append_log(err)
@@ -1552,6 +2255,7 @@ class ControlPanel(QWidget):
                         start_delay_ms=delay_ms,
                         land_nx=land_nx,
                         land_ny=land_ny,
+                        color=color,
                     )
                     if err:
                         self._append_log(err)
@@ -1591,16 +2295,97 @@ class ControlPanel(QWidget):
             self.overlay.show()
         else:
             self.overlay.hide()
+        self._maybe_save_settings()
 
     def _on_direction_changed(self, right_to_left: bool):
         global _SHOOT_DIRECTION
         _SHOOT_DIRECTION = "right_to_left" if right_to_left else "left_to_right"
         self._append_log(f"Shooting direction: {_SHOOT_DIRECTION}")
+        self._maybe_save_settings()
+
+    def _on_projectile_color(self):
+        color = _parse_color(self.txt_projectile_color.text())
+        if color is None:
+            self._append_log("Invalid color")
+            return
+        set_projectile_color(color)
+        self.txt_projectile_color.setText(color.name(QColor.HexRgb))
+        self._maybe_save_settings()
+
+    def _on_speed_changed(self, value: int):
+        self.overlay.set_speed(value)
+        self._maybe_save_settings()
+
+    def _on_running(self, running: bool):
+        self.overlay.set_running(running)
+        self._maybe_save_settings()
+
+    def _on_clickthrough(self, enabled: bool):
+        self.overlay.set_click_through(enabled)
+        self._maybe_save_settings()
+
+    def _maybe_save_settings(self):
+        if getattr(self, "_loading_settings", False):
+            return
+        self._save_settings()
+
+    def _load_settings(self):
+        data = {}
+        try:
+            if self._settings_path.exists():
+                data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+
+        self._loading_settings = True
+        try:
+            if "speed" in data:
+                self.sld_speed.setValue(int(data.get("speed")))
+            if "visible" in data:
+                self.chk_visible.setChecked(bool(data.get("visible")))
+            if "running" in data:
+                self.chk_running.setChecked(bool(data.get("running")))
+            if "click_through" in data:
+                self.chk_clickthrough.setChecked(bool(data.get("click_through")))
+            if "right_to_left" in data:
+                self.chk_direction.setChecked(bool(data.get("right_to_left")))
+            if "projectile_color" in data:
+                self.txt_projectile_color.setText(str(data.get("projectile_color")))
+                self._on_projectile_color()
+        finally:
+            self._loading_settings = False
+
+        # Apply non-signal changes explicitly.
+        self._on_visible(self.chk_visible.isChecked())
+        self._on_running(self.chk_running.isChecked())
+        self._on_clickthrough(self.chk_clickthrough.isChecked())
+        self._on_direction_changed(self.chk_direction.isChecked())
+
+    def _save_settings(self):
+        data = {
+            "speed": int(self.sld_speed.value()),
+            "visible": bool(self.chk_visible.isChecked()),
+            "running": bool(self.chk_running.isChecked()),
+            "click_through": bool(self.chk_clickthrough.isChecked()),
+            "right_to_left": bool(self.chk_direction.isChecked()),
+            "projectile_color": self.txt_projectile_color.text().strip(),
+        }
+        try:
+            self._settings_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
     def _shoot(self):
-        # Fire from the sprite overlay's current center position.
-        center_local = QPoint(self.overlay.width() // 2, self.overlay.height() // 2)
-        center_global = self.overlay.mapToGlobal(center_local)
+        # Fire from a random cat (if overlay supports it); otherwise use overlay center.
+        if hasattr(self.overlay, "random_cat_center_global"):
+            try:
+                center_global = self.overlay.random_cat_center_global()
+            except Exception:
+                center_local = QPoint(self.overlay.width() // 2, self.overlay.height() // 2)
+                center_global = self.overlay.mapToGlobal(center_local)
+        else:
+            center_local = QPoint(self.overlay.width() // 2, self.overlay.height() // 2)
+            center_global = self.overlay.mapToGlobal(center_local)
         try:
             # Stop moving briefly while shooting.
             try:
@@ -1613,6 +2398,7 @@ class ControlPanel(QWidget):
             self._append_log(f"Shoot failed: {e}")
 
     def closeEvent(self, event):
+        self._save_settings()
         # Closing the control panel exits the app
         QApplication.instance().quit()
         event.accept()
@@ -1667,7 +2453,7 @@ _connected_to: tuple[str, int] = None
 # from the cat's origin.
 def on_cat_clicked(global_pos: QPoint):
     global _SHOOT_DIRECTION
-    
+
     # Sender cat origin in normalized coordinates.
     sx, sy = _norm_point(global_pos)
 
@@ -1675,11 +2461,11 @@ def on_cat_clicked(global_pos: QPoint):
 
     # Randomize arc per shot (shared with peer via payload).
     # g: normalized units/s^2 (positive, y increases downward)
-    g = random.uniform(2.5, 4.0)
+    g = random.uniform(1.9, 3.2)
 
     # Peak height as a fraction of screen height (higher => larger arc).
     # Increased range to make the arc noticeably higher.
-    peak_h = random.uniform(0.40, 0.60)
+    peak_h = random.uniform(0.38, 0.62)
 
     # Initial vertical velocity that yields the chosen peak height.
     vy = -math.sqrt(max(0.0, 2.0 * g * peak_h))
@@ -1714,6 +2500,7 @@ def on_cat_clicked(global_pos: QPoint):
             "delay_ms": delay_ms,
             "direction": "right_to_left",
             "land_ny": land_ny,
+            "projectile_color": _PROJECTILE_COLOR.name(QColor.HexRgb),
         }
         msg = json.dumps(data)
 
@@ -1754,6 +2541,7 @@ def on_cat_clicked(global_pos: QPoint):
             "delay_ms": delay_ms,
             "direction": "left_to_right",
             "land_ny": land_ny,
+            "projectile_color": _PROJECTILE_COLOR.name(QColor.HexRgb),
         }
         msg = json.dumps(data)
 
@@ -1775,10 +2563,10 @@ if __name__ == "__main__":
     # Preload explosion audio to avoid first-play lag.
     _preload_explosion_sound()
 
-    frames = load_frames("frames")
-    w = SpriteOverlay(frames, fps=60)
+    # frames = load_frames("frames")
+    w = CatOverlay()
 
-    w.move(200, 200)
+    # w.move(200, 200)
     w.show()
 
     # Listen on all interfaces so peers can connect.
@@ -1802,7 +2590,7 @@ if __name__ == "__main__":
     # Clean up zeroconf on exit.
     app.aboutToQuit.connect(zc.close)
 
-    w.clicked.connect(on_cat_clicked)
+    # w.clicked.connect(on_cat_clicked)
 
     panel = ControlPanel(w, server, client)
     panel.show()
@@ -1813,10 +2601,9 @@ if __name__ == "__main__":
     _hotkey_listener = None
 
     def _hotkey_shoot():
-        print("_hotkey_shoot")
         # Fire from the sprite overlay's current center position.
-        center_local = QPoint(w.width() // 2, w.height() // 2)
-        center_global = w.mapToGlobal(center_local)
+        # center_local = QPoint(w.width() // 2, w.height() // 2)
+        center_global = w.random_cat_center_global()
         try:
             try:
                 w.pause_for_shot(350)
@@ -1835,7 +2622,7 @@ if __name__ == "__main__":
             ch = key.char
         except Exception:
             return
-        
+
         if ch not in ("s", "S"):
             return
 

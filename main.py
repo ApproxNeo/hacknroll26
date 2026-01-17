@@ -167,21 +167,13 @@ class ControlPanel(QWidget):
         self.chk_visible.toggled.connect(self._on_visible)
         root.addWidget(self.chk_visible)
 
-        # Click-through
-        self.chk_clickthrough = QCheckBox("Click-through overlay")
-        self.chk_clickthrough.setChecked(False)
-        self.chk_clickthrough.toggled.connect(self.overlay.set_click_through)
-        root.addWidget(self.chk_clickthrough)
-
         # Speed
         speed_row = QHBoxLayout()
-        speed_label = QLabel("Speed:")
         self.sld_speed = QSlider(Qt.Horizontal)
-        self.sld_speed.setRange(0, 20)  # Fixed: was locked at 5
+        self.sld_speed.setRange(5, 5)  # Fixed: was locked at 5
         # default from current velocity magnitude
         self.sld_speed.setValue(max(abs(self.overlay.vel.x()), abs(self.overlay.vel.y())))
         self.sld_speed.valueChanged.connect(self.overlay.set_speed)
-        speed_row.addWidget(speed_label)
         speed_row.addWidget(self.sld_speed)
         root.addLayout(speed_row)
 
@@ -195,7 +187,6 @@ class ControlPanel(QWidget):
 
         # Apply initial settings
         self.overlay.set_speed(self.sld_speed.value())
-        self.overlay.set_click_through(self.chk_clickthrough.isChecked())
 
     def _on_visible(self, visible: bool):
         if visible:
