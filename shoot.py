@@ -4,9 +4,11 @@ import socket
 import threading
 import uuid
 from pathlib import Path
+from PySide6.QtGui import QPainter, QPixmap, QMovie
+BASE_DIR = Path(__file__).resolve().parent
+EXPLOSION_GIF = BASE_DIR / "explode.gif"
 
-from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject, QDateTime
-from PySide6.QtGui import QPainter, QPixmap
+from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject, QDateTime, QSize
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox, QLineEdit, QTextEdit
 from PySide6.QtNetwork import QTcpServer, QTcpSocket, QHostAddress
 
@@ -309,6 +311,122 @@ class SpriteOverlay(QWidget):
         super().mousePressEvent(event)
 
 
+class GifOverlay(QWidget):
+    finished = Signal()
+
+    def __init__(self, gif_path: Path, pos: QPoint):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint |
+            Qt.WindowDoesNotAcceptFocus |
+            Qt.NoDropShadowWindowHint
+        )
+
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.NoFocus)
+
+        self.label = QLabel(self)
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        self.movie = QMovie(str(gif_path))
+        if not self.movie.isValid():
+            raise RuntimeError(f"Invalid GIF: {gif_path}")
+        self.movie.setCacheMode(QMovie.CacheAll)
+        # Some PySide6 builds don't expose QMovie.setLoopCount().
+        # We'll stop manually after one full loop using frameChanged.
+        self._loops_done = 0
+        self._prev_frame = -1
+        if hasattr(self.movie, "setLoopCount"):
+            try:
+                self.movie.setLoopCount(1)  # prefer native API when available
+            except Exception:
+                pass
+
+        self.label.setMovie(self.movie)
+        self.label.setScaledContents(True)
+
+        # QMovie.frameRect() can be (0,0,0,0) until a frame is loaded.
+        # Force-load the first frame so we get a real size.
+        try:
+            self.movie.jumpToFrame(0)
+        except Exception:
+            pass
+
+        pix = self.movie.currentPixmap()
+        if not pix.isNull():
+            size = pix.size()
+        else:
+            size = self.movie.frameRect().size()
+
+        # Fallback if still empty
+        if size.width() <= 0 or size.height() <= 0:
+            size = self.movie.scaledSize()
+        if size.width() <= 0 or size.height() <= 0:
+            size = self.label.sizeHint()
+        if size.width() <= 0 or size.height() <= 0:
+            size = QSize(128, 128)
+
+        self.resize(size)
+        self.label.resize(size)
+
+        # Center on the click position, but clamp to the current screen bounds.
+        screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
+        geo = screen.availableGeometry() if screen else QApplication.primaryScreen().availableGeometry()
+        x = pos.x() - size.width() // 2
+        y = pos.y() - size.height() // 2
+        x = max(geo.left(), min(x, geo.right() - size.width()))
+        y = max(geo.top(), min(y, geo.bottom() - size.height()))
+        self.move(x, y)
+
+        self.movie.frameChanged.connect(self._on_frame_changed)
+        self.movie.finished.connect(self._finish)
+
+    def _on_frame_changed(self, frame_no: int):
+        # Detect a loop restart when frame numbers wrap around (e.g. 10 -> 0).
+        if self._prev_frame != -1 and frame_no < self._prev_frame:
+            self._loops_done += 1
+            if self._loops_done >= 1:
+                # Stop after the first full loop.
+                QTimer.singleShot(0, self._finish)
+                return
+        self._prev_frame = frame_no
+
+    def _finish(self):
+        try:
+            self.movie.stop()
+        except Exception:
+            pass
+        self.finished.emit()
+        self.close()
+        self.deleteLater()
+
+
+_active_explosions: list[GifOverlay] = []
+
+
+def show_explosion(global_pos: QPoint) -> str | None:
+    gif_path = EXPLOSION_GIF
+    if not gif_path.exists():
+        return f"explode.gif not found at {gif_path}"
+
+    try:
+        overlay = GifOverlay(gif_path, global_pos)
+    except Exception as e:
+        return f"Failed to start explosion: {e}"
+
+    _active_explosions.append(overlay)
+    overlay.finished.connect(lambda ov=overlay: _active_explosions.remove(ov) if ov in _active_explosions else None)
+    overlay.show()
+    overlay.movie.start()
+    return None
+
+
 class ControlPanel(QWidget):
     def __init__(self, overlay: SpriteOverlay, server: MessageServer, client: MessageClient, initial_fps: int = 12):
         super().__init__()
@@ -402,8 +520,8 @@ class ControlPanel(QWidget):
 
         self.server.status_changed.connect(self._append_log)
         self.client.status_changed.connect(self._append_log)
-        self.server.message_received.connect(self._append_log)
-        self.client.message_received.connect(self._append_log)
+        self.server.message_received.connect(self._run_action)
+        self.client.message_received.connect(self._run_action)
 
         # Buttons
         btn_row = QHBoxLayout()
@@ -429,8 +547,12 @@ class ControlPanel(QWidget):
         if action_json["action"] == "fire":
             x = action_json.get("x", 0)
             y = action_json.get("y", 0)
-            self._append_log(f"Received 'fire' action at ({x}, {y})")
-            # Here you could add code to trigger an animation or effect on the overlay
+            err = show_explosion(QPoint(int(x), int(y)))
+            if err:
+                self._append_log(err)
+                return
+
+            self._append_log(f"Showing 'fire' action at ({x}, {y})")
 
     def _append_log(self, text: str):
         ts = QDateTime.currentDateTime().toString("HH:mm:ss")
