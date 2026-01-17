@@ -28,6 +28,51 @@ PROJECTILE_PNG = BASE_DIR / "projectile.png"
 # Cache the projectile pixmap (and scaled variants) so paint events are cheap.
 _PROJECTILE_PIX: QPixmap = None
 _PROJECTILE_SCALED: dict[int, QPixmap] = {}
+_PROJECTILE_TINTED: dict[tuple[int, int], QPixmap] = {}
+
+# Default colors (customizable via control panel).
+_PROJECTILE_COLOR = QColor(110, 110, 110)
+
+
+def _parse_color(text: str) -> QColor:
+    if not text:
+        return None
+    raw = text.strip()
+    if not raw:
+        return None
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",")]
+        if len(parts) in (3, 4):
+            try:
+                r, g, b = (int(parts[0]), int(parts[1]), int(parts[2]))
+                a = int(parts[3]) if len(parts) == 4 else 255
+                c = QColor(r, g, b, a)
+                return c if c.isValid() else None
+            except Exception:
+                return None
+    c = QColor(raw)
+    return c if c.isValid() else None
+
+
+def _tint_pixmap(pix: QPixmap, color: QColor) -> QPixmap:
+    if pix is None or pix.isNull() or color is None or not color.isValid():
+        return pix
+    key = (int(pix.cacheKey()), int(color.rgba()))
+    cached = _PROJECTILE_TINTED.get(key)
+    if cached is not None and not cached.isNull():
+        return cached
+
+    tinted = QPixmap(pix.size())
+    tinted.setDevicePixelRatio(pix.devicePixelRatio())
+    tinted.fill(Qt.transparent)
+    painter = QPainter(tinted)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.drawPixmap(0, 0, pix)
+    painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    painter.fillRect(tinted.rect(), color)
+    painter.end()
+    _PROJECTILE_TINTED[key] = tinted
+    return tinted
 
 
 # Shooting direction configuration
@@ -1177,7 +1222,7 @@ class GifOverlay(QWidget):
 class CannonBallOverlay(QWidget):
     finished = Signal(QPoint)  # emits landing position
 
-    def __init__(self, start_pos: QPoint, end_pos: QPoint, duration_ms: int = 900, radius: int = 10, arc_height: int = 220):
+    def __init__(self, start_pos: QPoint, end_pos: QPoint, duration_ms: int = 900, radius: int = 10, arc_height: int = 220, *, color: QColor = None):
         super().__init__()
         self.setWindowFlags(
             Qt.FramelessWindowHint |
@@ -1197,6 +1242,7 @@ class CannonBallOverlay(QWidget):
         self._duration = max(100, int(duration_ms))
         self._radius = max(2, int(radius))
         self._arc = int(arc_height)
+        self._color = QColor(color) if color is not None else QColor(_PROJECTILE_COLOR)
 
         # Widget size is just big enough to draw the projectile.
         d = self._radius * 6 + 2
@@ -1237,6 +1283,12 @@ class CannonBallOverlay(QWidget):
 
         self._set_center(QPoint(int(x), int(y)))
 
+    def set_color(self, color: QColor):
+        if color is None or not color.isValid():
+            return
+        self._color = QColor(color)
+        self.update()
+
     def paintEvent(self, _):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -1248,19 +1300,21 @@ class CannonBallOverlay(QWidget):
 
         # Draw the projectile image if available; otherwise fall back to a simple cannonball.
         if getattr(self, "_pix", None) is not None and not self._pix.isNull():
-            x = (self.width() - self._pix.width()) // 2
-            y = (self.height() - self._pix.height()) // 2
-            painter.drawPixmap(int(x), int(y), self._pix)
+            pix = _tint_pixmap(self._pix, self._color)
+            x = (self.width() - pix.width()) // 2
+            y = (self.height() - pix.height()) // 2
+            painter.drawPixmap(int(x), int(y), pix)
         else:
             r = self._radius
             cx = self.width() // 2
             cy = self.height() // 2
 
             painter.setPen(Qt.NoPen)
-            painter.setBrush(Qt.gray)
+            base = self._color if self._color is not None else QColor(Qt.gray)
+            painter.setBrush(base)
             painter.drawEllipse(QPoint(cx, cy), r, r)
 
-            painter.setBrush(Qt.white)
+            painter.setBrush(base.lighter(160))
             painter.setOpacity(0.25)
             painter.drawEllipse(
                 QPoint(cx - max(2, r // 3), cy - max(2, r // 3)),
@@ -1286,6 +1340,7 @@ class ProjectileOverlay(QWidget):
         t_end: float,
         *,
         radius: int = 10,
+        color: QColor = None,
     ):
         super().__init__()
         self.setWindowFlags(
@@ -1308,6 +1363,7 @@ class ProjectileOverlay(QWidget):
         self._vy = float(vy)
         self._g = float(g)
         self._t_end = max(0.0, float(t_end))
+        self._color = QColor(color) if color is not None else QColor(_PROJECTILE_COLOR)
 
         self._radius = max(2, int(radius))
         d = self._radius * 4 + 2
@@ -1348,6 +1404,12 @@ class ProjectileOverlay(QWidget):
 
         self._set_center(self._pos_at(t))
 
+    def set_color(self, color: QColor):
+        if color is None or not color.isValid():
+            return
+        self._color = QColor(color)
+        self.update()
+
     def paintEvent(self, _):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -1358,19 +1420,21 @@ class ProjectileOverlay(QWidget):
 
         # Draw the projectile image if available; otherwise fall back to a simple ball.
         if getattr(self, "_pix", None) is not None and not self._pix.isNull():
-            x = (self.width() - self._pix.width()) // 2
-            y = (self.height() - self._pix.height()) // 2
-            painter.drawPixmap(int(x), int(y), self._pix)
+            pix = _tint_pixmap(self._pix, self._color)
+            x = (self.width() - pix.width()) // 2
+            y = (self.height() - pix.height()) // 2
+            painter.drawPixmap(int(x), int(y), pix)
         else:
             r = self._radius
             cx = self.width() // 2
             cy = self.height() // 2
 
             painter.setPen(Qt.NoPen)
-            painter.setBrush(Qt.gray)
+            base = self._color if self._color is not None else QColor(Qt.gray)
+            painter.setBrush(base)
             painter.drawEllipse(QPoint(cx, cy), r, r)
 
-            painter.setBrush(Qt.white)
+            painter.setBrush(base.lighter(160))
             painter.setOpacity(0.25)
             painter.drawEllipse(
                 QPoint(cx - max(2, r // 3), cy - max(2, r // 3)),
@@ -1388,6 +1452,23 @@ _active_explosions: list[GifOverlay] = []
 _MAX_ACTIVE_CANNONBALLS = 10
 _MAX_ACTIVE_PROJECTILES = 16
 _MAX_ACTIVE_EXPLOSIONS = 12
+
+
+def set_projectile_color(color: QColor):
+    global _PROJECTILE_COLOR
+    if color is None or not color.isValid():
+        return
+    _PROJECTILE_COLOR = QColor(color)
+    for ov in list(_active_projectiles):
+        try:
+            ov.set_color(_PROJECTILE_COLOR)
+        except Exception:
+            pass
+    for ov in list(_active_cannonballs):
+        try:
+            ov.set_color(_PROJECTILE_COLOR)
+        except Exception:
+            pass
 
 
 def _drop_oldest(overlays: list):
@@ -2053,6 +2134,16 @@ class ControlPanel(QWidget):
         self.chk_direction.setChecked(False)
         self.chk_direction.toggled.connect(self._on_direction_changed)
         root.addWidget(self.chk_direction)
+
+        # Color customization
+        projectile_color_row = QHBoxLayout()
+        projectile_color_row.addWidget(QLabel("Projectile/Cannon color"))
+        self.txt_projectile_color = QLineEdit()
+        self.txt_projectile_color.setPlaceholderText("#RRGGBB / #RRGGBBAA / name / r,g,b")
+        self.txt_projectile_color.setText(_PROJECTILE_COLOR.name(QColor.HexRgb))
+        self.txt_projectile_color.editingFinished.connect(self._on_projectile_color)
+        projectile_color_row.addWidget(self.txt_projectile_color)
+        root.addLayout(projectile_color_row)
         
         # Shoot config
         shoot_row = QHBoxLayout()
@@ -2099,6 +2190,12 @@ class ControlPanel(QWidget):
             return
 
         action = action_json.get("action")
+
+        if action == "cannon":
+            # Apply remote color override if present.
+            color = _parse_color(action_json.get("projectile_color", ""))
+            if color is not None:
+                set_projectile_color(color)
 
         if action == "fire":
             x = action_json.get("x", 0)
@@ -2189,6 +2286,14 @@ class ControlPanel(QWidget):
         global _SHOOT_DIRECTION
         _SHOOT_DIRECTION = "right_to_left" if right_to_left else "left_to_right"
         self._append_log(f"Shooting direction: {_SHOOT_DIRECTION}")
+
+    def _on_projectile_color(self):
+        color = _parse_color(self.txt_projectile_color.text())
+        if color is None:
+            self._append_log("Invalid color")
+            return
+        set_projectile_color(color)
+        self.txt_projectile_color.setText(color.name(QColor.HexRgb))
 
     def _shoot(self):
         # Fire from a random cat (if overlay supports it); otherwise use overlay center.
@@ -2314,6 +2419,7 @@ def on_cat_clicked(global_pos: QPoint):
             "delay_ms": delay_ms,
             "direction": "right_to_left",
             "land_ny": land_ny,
+            "projectile_color": _PROJECTILE_COLOR.name(QColor.HexRgb),
         }
         msg = json.dumps(data)
 
@@ -2354,6 +2460,7 @@ def on_cat_clicked(global_pos: QPoint):
             "delay_ms": delay_ms,
             "direction": "left_to_right",
             "land_ny": land_ny,
+            "projectile_color": _PROJECTILE_COLOR.name(QColor.HexRgb),
         }
         msg = json.dumps(data)
 
