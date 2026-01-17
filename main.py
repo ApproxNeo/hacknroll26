@@ -1,12 +1,14 @@
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QPoint
+from PySide6.QtCore import Qt, QTimer, QPoint, QRect, Signal
 from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox
 
 
 class SpriteOverlay(QWidget):
+    # Signal emitted when the defined click region is clicked
+    panel_requested = Signal()
     def __init__(self, frames: list[QPixmap], fps: int = 12):
         super().__init__()
         self.frames = frames
@@ -26,11 +28,16 @@ class SpriteOverlay(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setFocusPolicy(Qt.NoFocus)
 
-        # Optional click-through
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # Mouse interaction: default to NOT click-through so we can detect clicks
+        # Users can toggle click-through from the control panel.
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
 
         # Size to first frame
         self.resize(self.frames[0].size())
+
+        # Default clickable region: the entire sprite area
+        fw, fh = self.frames[0].width(), self.frames[0].height()
+        self.click_region = QRect(0, 0, fw, fh)
 
         # Animation timer
         self.anim_timer = QTimer(self)
@@ -56,6 +63,10 @@ class SpriteOverlay(QWidget):
 
     def set_click_through(self, enabled: bool):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, bool(enabled))
+
+    def set_click_region(self, rect: QRect):
+        # Allow external customization of the clickable area
+        self.click_region = QRect(rect)
 
     def set_running(self, running: bool):
         running = bool(running)
@@ -94,6 +105,15 @@ class SpriteOverlay(QWidget):
 
         painter.drawPixmap(0, 0, self.frames[self.frame_i])
 
+    def mousePressEvent(self, event):
+        # Only respond when not click-through and clicking inside the defined region
+        if self.testAttribute(Qt.WA_TransparentForMouseEvents):
+            return
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        if self.click_region.contains(pos):
+            self.panel_requested.emit()
+        # Let other clicks be ignored (no action)
+
 
 class ControlPanel(QWidget):
     def __init__(self, overlay: SpriteOverlay, initial_fps: int = 12):
@@ -101,6 +121,11 @@ class ControlPanel(QWidget):
         self.overlay = overlay
 
         self.setWindowTitle("Sprite Control Panel")
+        # Remove minimize/maximize buttons; keep title and close
+        self.setWindowFlag(Qt.WindowMinimizeButtonHint, False)
+        self.setWindowFlag(Qt.WindowMaximizeButtonHint, False)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, True)
+        self.setWindowFlag(Qt.WindowTitleHint, True)
 
         root = QVBoxLayout(self)
 
@@ -110,50 +135,33 @@ class ControlPanel(QWidget):
         self.chk_visible.toggled.connect(self._on_visible)
         root.addWidget(self.chk_visible)
 
-        # Running
-        self.chk_running = QCheckBox("Animate / move")
-        self.chk_running.setChecked(True)
-        self.chk_running.toggled.connect(self.overlay.set_running)
-        root.addWidget(self.chk_running)
-
         # Click-through
         self.chk_clickthrough = QCheckBox("Click-through overlay")
-        self.chk_clickthrough.setChecked(True)
+        self.chk_clickthrough.setChecked(False)
         self.chk_clickthrough.toggled.connect(self.overlay.set_click_through)
         root.addWidget(self.chk_clickthrough)
 
-        # FPS
-        fps_row = QHBoxLayout()
-        fps_row.addWidget(QLabel("FPS"))
-        self.spin_fps = QSpinBox()
-        self.spin_fps.setRange(1, 60)
-        self.spin_fps.setValue(int(initial_fps))
-        self.spin_fps.valueChanged.connect(self.overlay.set_fps)
-        fps_row.addWidget(self.spin_fps)
-        fps_row.addStretch(1)
-        root.addLayout(fps_row)
-
         # Speed
         speed_row = QHBoxLayout()
-        speed_row.addWidget(QLabel("Speed"))
+        speed_label = QLabel("Speed:")
         self.sld_speed = QSlider(Qt.Horizontal)
-        self.sld_speed.setRange(0, 30)
+        self.sld_speed.setRange(0, 20)  # Fixed: was locked at 5
         # default from current velocity magnitude
         self.sld_speed.setValue(max(abs(self.overlay.vel.x()), abs(self.overlay.vel.y())))
         self.sld_speed.valueChanged.connect(self.overlay.set_speed)
+        speed_row.addWidget(speed_label)
         speed_row.addWidget(self.sld_speed)
         root.addLayout(speed_row)
 
         # Buttons
         btn_row = QHBoxLayout()
         btn_quit = QPushButton("Quit")
-        btn_quit.clicked.connect(QApplication.instance().quit)
+        btn_quit.clicked.connect(self._on_quit_clicked)
         btn_row.addStretch(1)
         btn_row.addWidget(btn_quit)
         root.addLayout(btn_row)
 
         # Apply initial settings
-        self.overlay.set_fps(self.spin_fps.value())
         self.overlay.set_speed(self.sld_speed.value())
         self.overlay.set_click_through(self.chk_clickthrough.isChecked())
 
@@ -163,10 +171,14 @@ class ControlPanel(QWidget):
         else:
             self.overlay.hide()
 
-    def closeEvent(self, event):
-        # Closing the control panel exits the app
+    def _on_quit_clicked(self):
+        # Quit button explicitly quits the app
         QApplication.instance().quit()
-        event.accept()
+
+    def closeEvent(self, event):
+        # Close button (X) just hides the panel
+        self.hide()
+        event.ignore()
 
 
 def load_frames(folder: str) -> list[QPixmap]:
@@ -188,6 +200,9 @@ if __name__ == "__main__":
     w.show()
 
     panel = ControlPanel(w, initial_fps=12)
-    panel.show()
+    # Show the panel only when clicking the defined region on the cat
+    w.panel_requested.connect(panel.show)
+    w.panel_requested.connect(panel.raise_)
+    w.panel_requested.connect(panel.activateWindow)
 
     sys.exit(app.exec())
