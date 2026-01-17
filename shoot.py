@@ -1041,36 +1041,30 @@ def shoot_projectile_remote_arrive_left(
     else:
         start_delay_ms = max(0, int(start_delay_ms))
 
-    # Remote starts slightly offscreen to the left.
+    # Always continue from the sender's exit state so the arc lines up across machines.
+    # State at the moment it fully exits on the sender.
+    y_exit = sy + vy0 * t_exit + 0.5 * g * t_exit * t_exit
+    vy_exit = vy0 + g * t_exit
+
+    # Remote starts slightly offscreen to the left using that same state.
     x0 = x_entry
-    y0 = float(entry_ny if entry_ny is not None else 0.5)
+    y0 = float(y_exit)
+    vy_start = float(vy_exit)
 
-    # If no explicit landing target is provided, keep old behavior (land back at sy).
-    if land_nx is None or land_ny is None:
-        # State at the moment it fully exits on the sender.
-        y_exit = sy + vy0 * t_exit + 0.5 * g * t_exit * t_exit
-        vy_exit = vy0 + g * t_exit
-
-        y0 = float(y_exit)
-        t_land = _solve_landing_time(y0, vy_exit, g, sy)
-        vy_start = float(vy_exit)
-    else:
-        # Clamp targets to sane bounds in normalized space.
+    # If a landing Y is provided, land when y reaches that value (gives random landing x too).
+    # Otherwise, default to landing back at the sender's original y (previous behavior).
+    if land_ny is not None:
         try:
-            tx = float(land_nx)
-            ty = float(land_ny)
+            y_land = float(land_ny)
         except Exception:
-            tx, ty = 0.5, 0.75
-        tx = max(0.05, min(0.95, tx))
-        ty = max(0.05, min(0.95, ty))
+            y_land = sy
+        y_land = max(0.05, min(0.95, y_land))
+    else:
+        y_land = sy
 
-        # Choose time-to-land based on horizontal travel.
-        t_land = (tx - x0) / vx
-        if t_land <= 0.05:
-            t_land = 0.05
-
-        # Solve for initial vertical velocity so y(t_land) = ty.
-        vy_start = (ty - y0 - 0.5 * g * t_land * t_land) / t_land
+    t_land = _solve_landing_time(y0, vy_start, g, y_land)
+    if t_land <= 0.05:
+        t_land = 0.05
 
     def _spawn():
         try:
@@ -1158,36 +1152,30 @@ def shoot_projectile_remote_arrive_right(
     else:
         start_delay_ms = max(0, int(start_delay_ms))
 
-    # Remote starts slightly offscreen to the right.
+    # Always continue from the sender's exit state so the arc lines up across machines.
+    # State at the moment it fully exits on the sender.
+    y_exit = sy + vy0 * t_exit + 0.5 * g * t_exit * t_exit
+    vy_exit = vy0 + g * t_exit
+
+    # Remote starts slightly offscreen to the right using that same state.
     x0 = x_entry
-    y0 = float(entry_ny if entry_ny is not None else 0.5)
+    y0 = float(y_exit)
+    vy_start = float(vy_exit)
 
-    # If no explicit landing target is provided, keep old behavior (land back at sy).
-    if land_nx is None or land_ny is None:
-        # State at the moment it fully exits on the sender.
-        y_exit = sy + vy0 * t_exit + 0.5 * g * t_exit * t_exit
-        vy_exit = vy0 + g * t_exit
-
-        y0 = float(y_exit)
-        t_land = _solve_landing_time(y0, vy_exit, g, sy)
-        vy_start = float(vy_exit)
-    else:
-        # Clamp targets to sane bounds in normalized space.
+    # If a landing Y is provided, land when y reaches that value (gives random landing x too).
+    # Otherwise, default to landing back at the sender's original y (previous behavior).
+    if land_ny is not None:
         try:
-            tx = float(land_nx)
-            ty = float(land_ny)
+            y_land = float(land_ny)
         except Exception:
-            tx, ty = 0.5, 0.75
-        tx = max(0.05, min(0.95, tx))
-        ty = max(0.05, min(0.95, ty))
+            y_land = sy
+        y_land = max(0.05, min(0.95, y_land))
+    else:
+        y_land = sy
 
-        # Choose time-to-land based on horizontal travel.
-        t_land = (tx - x0) / vx  # vx is negative
-        if t_land <= 0.05:
-            t_land = 0.05
-
-        # Solve for initial vertical velocity so y(t_land) = ty.
-        vy_start = (ty - y0 - 0.5 * g * t_land * t_land) / t_land
+    t_land = _solve_landing_time(y0, vy_start, g, y_land)
+    if t_land <= 0.05:
+        t_land = 0.05
 
     def _spawn():
         try:
@@ -1499,7 +1487,6 @@ def on_cat_clicked(global_pos: QPoint):
         x_exit = -0.05
         delay_ms = int(round(max(0.0, (x_exit - sx) / vx) * 1000.0))
 
-        land_nx = random.uniform(0.2, 0.8)
         land_ny = random.uniform(0.25, 0.85)
         data = {
             "action": "cannon",
@@ -1510,7 +1497,6 @@ def on_cat_clicked(global_pos: QPoint):
             "g": g,
             "delay_ms": delay_ms,
             "direction": "right_to_left",
-            "land_nx": land_nx,
             "land_ny": land_ny,
         }
         msg = json.dumps(data)
@@ -1528,7 +1514,6 @@ def on_cat_clicked(global_pos: QPoint):
         x_exit = 1.05
         delay_ms = int(round(max(0.0, (x_exit - sx) / vx) * 1000.0))
 
-        land_nx = random.uniform(0.2, 0.8)
         land_ny = random.uniform(0.25, 0.85)
         data = {
             "action": "cannon",
@@ -1539,7 +1524,6 @@ def on_cat_clicked(global_pos: QPoint):
             "g": g,
             "delay_ms": delay_ms,
             "direction": "left_to_right",
-            "land_nx": land_nx,
             "land_ny": land_ny,
         }
         msg = json.dumps(data)
