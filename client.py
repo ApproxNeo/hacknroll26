@@ -1,36 +1,38 @@
-import asyncio
-from bleak import BleakClient, BleakScanner
+import socket
+import time
+from zeroconf import ServiceBrowser, Zeroconf
 
-SERVICE_UUID = "12345678-1234-5678-1234-56789abcdef0"
-CHAR_UUID    = "12345678-1234-5678-1234-56789abcdef1"
-TARGET_NAME  = "BLEChat"
+SERVICE_TYPE = "_p2pchat._tcp.local."
 
-def on_notify(_, data: bytearray):
-    print("[NOTIFY from server]", data.decode("utf-8", errors="replace"))
+class Listener:
+    def __init__(self):
+        self.target = None  # (ip, port)
 
-async def pick_device():
-    devices = await BleakScanner.discover(timeout=5.0)
-    for d in devices:
-        if d.name == TARGET_NAME:
-            return d
-    return None
-
-async def main():
-    dev = await pick_device()
-    if not dev:
-        raise SystemExit(f"Did not find device named '{TARGET_NAME}'. Move closer and try again.")
-
-    print("Connecting to:", dev.address, dev.name)
-    async with BleakClient(dev.address) as client:
-        await client.start_notify(CHAR_UUID, on_notify)
-        print("Connected. Type messages to WRITE to server (client -> server). Ctrl+C to exit.\n")
-
-        loop = asyncio.get_running_loop()
-        while True:
-            line = await loop.run_in_executor(None, input, "")
-            if not line:
-                continue
-            await client.write_gatt_char(CHAR_UUID, line.encode("utf-8"), response=True)
+    def add_service(self, zc, service_type, name):
+        info = zc.get_service_info(service_type, name)
+        if not info or not info.addresses:
+            return
+        ip = socket.inet_ntoa(info.addresses[0])
+        port = info.port
+        print(f"[mdns] found {name} at {ip}:{port}")
+        self.target = (ip, port)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    zc = Zeroconf()
+    listener = Listener()
+    browser = ServiceBrowser(zc, SERVICE_TYPE, listener)
+
+    # Wait a bit for discovery
+    deadline = time.time() + 10
+    while listener.target is None and time.time() < deadline:
+        time.sleep(0.1)
+
+    zc.close()
+
+    if listener.target is None:
+        raise SystemExit("No peer found via mDNS")
+
+    ip, port = listener.target
+    with socket.create_connection((ip, port), timeout=5) as s:
+        s.sendall(b"hello from peer2\n")
+        print("[client] reply:", s.recv(4096).decode("utf-8", "replace"))
