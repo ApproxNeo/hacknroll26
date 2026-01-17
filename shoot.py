@@ -304,8 +304,10 @@ class SpriteOverlay(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            # global click position (useful for logs / debugging)
-            self.clicked.emit(event.globalPosition().toPoint())
+            # Use the sprite's center as the "cat position".
+            center_local = QPoint(self.width() // 2, self.height() // 2)
+            center_global = self.mapToGlobal(center_local)
+            self.clicked.emit(center_global)
             event.accept()
             return
         super().mousePressEvent(event)
@@ -434,7 +436,7 @@ class CannonBallOverlay(QWidget):
         self._arc = int(arc_height)
 
         # Widget size is just big enough to draw the ball.
-        d = self._radius * 2 + 2
+        d = self._radius * 4 + 2
         self.resize(d, d)
 
         # Start at start_pos (centered).
@@ -486,7 +488,7 @@ class CannonBallOverlay(QWidget):
         cy = self.height() // 2
 
         painter.setPen(Qt.NoPen)
-        painter.setBrush(Qt.black)
+        painter.setBrush(Qt.gray)
         painter.drawEllipse(QPoint(cx, cy), r, r)
 
         painter.setBrush(Qt.white)
@@ -802,7 +804,7 @@ class ControlPanel(QWidget):
                 y = action_json.get("y", 0)
                 target = QPoint(int(x), int(y))
 
-            # If direction is provided, start offscreen so it "arrives" on this machine.
+            # If direction is provided, start just offscreen (behind the target) so it "arrives" cleanly.
             vx = action_json.get("vx", None)
             vy = action_json.get("vy", None)
             start = None
@@ -810,7 +812,9 @@ class ControlPanel(QWidget):
                 try:
                     vx = float(vx)
                     vy = float(vy)
-                    start = _offscreen_start_towards_target(target, vx, vy)
+                    back_step_px = 220
+                    behind = QPoint(int(target.x() - vx * back_step_px), int(target.y() - vy * back_step_px))
+                    start = _extend_line_offscreen(target, behind)
                 except Exception:
                     start = None
 
@@ -877,12 +881,10 @@ def on_cat_clicked(global_pos: QPoint):
     # Target (where the remote will see it land).
     nx, ny = _norm_point(global_pos)
 
-    # Compute a direction vector in normalized screen space from a local cannon origin.
-    origin = _cannon_origin_for_screen_pos(global_pos)
-    ox, oy = _norm_point(origin)
-    vx = nx - ox
-    vy = ny - oy
-    # Normalize.
+    # Choose a stable "fire direction" based on where the cat is relative to screen center.
+    vx = nx - 0.5
+    vy = ny - 0.5
+
     import math
     mag = math.hypot(vx, vy)
     if mag < 1e-6:
@@ -893,15 +895,14 @@ def on_cat_clicked(global_pos: QPoint):
     data = {"action": "cannon", "nx": nx, "ny": ny, "vx": vx, "vy": vy}
     msg = json.dumps(data)
 
-    # Local effect: launch from origin THROUGH the click and exit the screen (no explosion).
-    local_target = _denorm_point(nx, ny, reference_pos=global_pos)
-    offscreen_end = _extend_line_offscreen(origin, local_target)
-    shoot_cannon_to(offscreen_end, start_global_pos=origin, explode_on_land=False)
+    # Local effect: start at the cat and exit the local screen (no explosion).
+    step_px = 220
+    through = QPoint(int(global_pos.x() + vx * step_px), int(global_pos.y() + vy * step_px))
+    offscreen_end = _extend_line_offscreen(global_pos, through)
+    shoot_cannon_to(offscreen_end, start_global_pos=global_pos, explode_on_land=False)
 
-    # Send to peers connected to our server
+    # Send to peers
     server.broadcast(msg)
-
-    # Send to a peer we connected to as a client
     client.send(msg)
 
 if __name__ == "__main__":
