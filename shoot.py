@@ -224,9 +224,9 @@ class Cat:
         self._ensure_on_screen(screen_rect)
         
         # Teleport to random edge periodically
-        if self.teleport_timer <= 0:
-            self._teleport_to_random_edge(screen_rect)
-            self.teleport_timer = random.randint(8000, 15000)
+        # if self.teleport_timer <= 0:
+        #     self._teleport_to_random_edge(screen_rect)
+        #     self.teleport_timer = random.randint(8000, 15000)
     
     def _update_bottom_edge(self, screen_rect: QRect):
         """Cat walking on bottom edge"""
@@ -548,8 +548,8 @@ class Cat:
             self.y > screen_rect.bottom()
         )
         
-        if off_screen:
-            self._flip_to_random_edge(screen_rect)
+        # if off_screen:
+        #     self._flip_to_random_edge(screen_rect)
     
     def _teleport_to_random_edge(self, screen_rect: QRect):
         """Teleport cat to a random edge"""
@@ -691,7 +691,7 @@ class CatOverlay(QWidget):
         if self.shutting_down:
             return
         
-        if len(self.cats) >= 5:
+        if len(self.cats) >= 3:
             return
         
         screen = self.geometry()
@@ -700,7 +700,7 @@ class CatOverlay(QWidget):
         new_cats = []
         for _ in range(spawn_count):
             base = random.choice(self.cats)
-            new_edge = random.choice([Cat.BOTTOM, Cat.TOP, Cat.LEFT, Cat.RIGHT])
+            new_edge = Cat.BOTTOM # random.choice([Cat.BOTTOM, Cat.TOP, Cat.LEFT, Cat.RIGHT])
             new_cat = Cat(
                 base.x + random.randint(-20, 20),
                 base.y + random.randint(-20, 20),
@@ -1557,7 +1557,6 @@ def _play_explosion_sound():
     except Exception:
         pass
 
-
 def show_explosion(global_pos: QPoint) -> str:
     gif_path = EXPLOSION_GIF
     if not gif_path.exists():
@@ -1807,9 +1806,20 @@ def shoot_projectile_remote_arrive_left(
     if t_land <= 0.05:
         t_land = 0.05
 
+    # If the projectile would "land" before it ever becomes visible on this screen,
+    # don't spawn it and (critically) don't explode.
+    t_enter = (0.0 - x0) / vx  # x crosses 0.0 (enters the screen)
+    t_exit_screen = (x_exit - x0) / vx  # x reaches the sender's exit point on this screen
+    if t_land <= t_enter:
+        return None
+
+    # If it would land offscreen (after it has already exited), let it just fly across
+    # and disappear at the screen-exit point; no explosion.
+    t_end = min(t_land, t_exit_screen)
+
     def _spawn():
         try:
-            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_land)
+            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_end)
         except Exception as e:
             try:
                 print(f"Failed to start remote projectile: {e}")
@@ -1821,7 +1831,13 @@ def shoot_projectile_remote_arrive_left(
             _drop_oldest(_active_projectiles)
         _active_projectiles.append(proj)
         proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
-        proj.finished.connect(lambda p: show_explosion(p))
+
+        def _maybe_explode(p: QPoint, *, _geo=geo, _t_end=t_end, _t_land=t_land):
+            # Only explode if the projectile actually lands on this screen (not offscreen).
+            if _t_end >= (_t_land - 1e-6) and _geo.contains(p):
+                show_explosion(p)
+
+        proj.finished.connect(_maybe_explode)
         proj.show()
 
     QTimer.singleShot(int(start_delay_ms), _spawn)
@@ -1918,9 +1934,20 @@ def shoot_projectile_remote_arrive_right(
     if t_land <= 0.05:
         t_land = 0.05
 
+    # If the projectile would "land" before it ever becomes visible on this screen,
+    # don't spawn it and (critically) don't explode.
+    t_enter = (1.0 - x0) / vx  # x crosses 1.0 (enters the screen from the right)
+    t_exit_screen = (x_exit - x0) / vx  # x reaches the sender's exit point on this screen
+    if t_land <= t_enter:
+        return None
+
+    # If it would land offscreen (after it has already exited), let it just fly across
+    # and disappear at the screen-exit point; no explosion.
+    t_end = min(t_land, t_exit_screen)
+
     def _spawn():
         try:
-            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_land)
+            proj = ProjectileOverlay(geo, x0, y0, vx, vy_start, g, t_end)
         except Exception as e:
             try:
                 print(f"Failed to start remote projectile: {e}")
@@ -1932,7 +1959,13 @@ def shoot_projectile_remote_arrive_right(
             _drop_oldest(_active_projectiles)
         _active_projectiles.append(proj)
         proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
-        proj.finished.connect(lambda p: show_explosion(p))
+
+        def _maybe_explode(p: QPoint, *, _geo=geo, _t_end=t_end, _t_land=t_land):
+            # Only explode if the projectile actually lands on this screen (not offscreen).
+            if _t_end >= (_t_land - 1e-6) and _geo.contains(p):
+                show_explosion(p)
+
+        proj.finished.connect(_maybe_explode)
         proj.show()
 
     QTimer.singleShot(int(start_delay_ms), _spawn)
@@ -1945,7 +1978,7 @@ def shoot_cannon_to(
     *,
     explode_on_land: bool = True,
     duration_ms: int = 900,
-    arc_height: int = 220,
+    arc_height: int = 200,
 ) -> str:
     # Choose a start position: bottom-left-ish of the screen containing the target.
     screen = QApplication.screenAt(target_global_pos) or QApplication.primaryScreen()
@@ -2242,11 +2275,11 @@ def on_cat_clicked(global_pos: QPoint):
 
     # Randomize arc per shot (shared with peer via payload).
     # g: normalized units/s^2 (positive, y increases downward)
-    g = random.uniform(2.5, 4.0)
+    g = random.uniform(2.4, 3.8)
 
     # Peak height as a fraction of screen height (higher => larger arc).
     # Increased range to make the arc noticeably higher.
-    peak_h = random.uniform(0.40, 0.60)
+    peak_h = random.uniform(0.32, 0.52)
 
     # Initial vertical velocity that yields the chosen peak height.
     vy = -math.sqrt(max(0.0, 2.0 * g * peak_h))
