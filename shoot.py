@@ -3,10 +3,12 @@ import json
 import socket
 import threading
 import uuid
+import subprocess
 from pathlib import Path
 from PySide6.QtGui import QPainter, QPixmap, QMovie
 BASE_DIR = Path(__file__).resolve().parent
 EXPLOSION_GIF = BASE_DIR / "explode.gif"
+EXPLOSION_MP3 = BASE_DIR / "explode.mp3"
 PROJECTILE_PNG = BASE_DIR / "projectile.png"
 
 # Cache the projectile pixmap (and scaled variants) so paint events are cheap.
@@ -487,7 +489,7 @@ class CannonBallOverlay(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(16)
+        self._timer.start(24)
 
     def _set_center(self, p: QPoint):
         # Move widget so that its center sits on p.
@@ -597,7 +599,7 @@ class ProjectileOverlay(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(16)
+        self._timer.start(24)
 
     def _pos_at(self, t: float) -> QPoint:
         # Normalized projectile motion.
@@ -659,18 +661,100 @@ class ProjectileOverlay(QWidget):
 
 
 _active_cannonballs: list[CannonBallOverlay] = []
-
-
 _active_projectiles: list[ProjectileOverlay] = []
-
-
 _active_explosions: list[GifOverlay] = []
+
+# Caps to avoid lag if many projectiles/explosions are active at once.
+_MAX_ACTIVE_CANNONBALLS = 10
+_MAX_ACTIVE_PROJECTILES = 16
+_MAX_ACTIVE_EXPLOSIONS = 12
+
+
+def _drop_oldest(overlays: list):
+    """Close & delete the oldest overlay in the list (best-effort)."""
+    if not overlays:
+        return
+    try:
+        ov = overlays.pop(0)
+    except Exception:
+        return
+    try:
+        ov.close()
+    except Exception:
+        pass
+    try:
+        ov.deleteLater()
+    except Exception:
+        pass
+
+# ---- Explosion sound ----
+# Keep a small pool of processes so multiple explosions can overlap without cutting each other off.
+_EXPLODE_PROCS: list[subprocess.Popen] = []
+_EXPLODE_MAX_SIMULTANEOUS = 4
+
+
+def _play_explosion_sound():
+    """Best-effort, non-blocking playback of explode.mp3 using OS tools.
+
+    Allows overlapping plays (multiple explosions close together) by spawning a new
+    player process each time, keeping a small capped pool.
+    """
+    global _EXPLODE_PROCS
+
+    if not EXPLOSION_MP3.exists():
+        return
+
+    try:
+        # Prune finished processes.
+        _EXPLODE_PROCS = [p for p in _EXPLODE_PROCS if p is not None and p.poll() is None]
+
+        # If we're already playing many at once, drop the oldest reference (do not terminate)
+        # to avoid unbounded growth. (Process will finish on its own.)
+        if len(_EXPLODE_PROCS) >= _EXPLODE_MAX_SIMULTANEOUS:
+            _EXPLODE_PROCS = _EXPLODE_PROCS[-(_EXPLODE_MAX_SIMULTANEOUS - 1):]
+
+        proc = None
+        if sys.platform == "darwin":
+            # macOS: afplay is available by default.
+            proc = subprocess.Popen(
+                ["afplay", str(EXPLOSION_MP3)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        elif sys.platform.startswith("win"):
+            # Windows: open with default associated app (best-effort).
+            proc = subprocess.Popen(
+                ["cmd", "/c", "start", "", str(EXPLOSION_MP3)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            # Linux / others: try common players or xdg-open.
+            for cmd in (["paplay"], ["aplay"], ["ffplay", "-nodisp", "-autoexit"], ["xdg-open"]):
+                try:
+                    proc = subprocess.Popen(
+                        cmd + [str(EXPLOSION_MP3)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    break
+                except Exception:
+                    proc = None
+
+        if proc is not None:
+            _EXPLODE_PROCS.append(proc)
+    except Exception:
+        pass
 
 
 def show_explosion(global_pos: QPoint) -> str:
     gif_path = EXPLOSION_GIF
     if not gif_path.exists():
         return f"explode.gif not found at {gif_path}"
+
+    # Avoid too many simultaneous GIF decoders.
+    if len(_active_explosions) >= _MAX_ACTIVE_EXPLOSIONS:
+        _drop_oldest(_active_explosions)
 
     try:
         overlay = GifOverlay(gif_path, global_pos)
@@ -681,6 +765,8 @@ def show_explosion(global_pos: QPoint) -> str:
     overlay.finished.connect(lambda ov=overlay: _active_explosions.remove(ov) if ov in _active_explosions else None)
     overlay.show()
     overlay.movie.start()
+
+    _play_explosion_sound()
     return None
 
 
@@ -839,6 +925,8 @@ def shoot_projectile_local_exit_right(start_global_pos: QPoint, vx: float, vy: f
     except Exception as e:
         return f"Failed to start projectile: {e}"
 
+    if len(_active_projectiles) >= _MAX_ACTIVE_PROJECTILES:
+        _drop_oldest(_active_projectiles)
     _active_projectiles.append(proj)
     proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
     proj.show()
@@ -897,6 +985,8 @@ def shoot_projectile_remote_arrive_left(
                 pass
             return
 
+        if len(_active_projectiles) >= _MAX_ACTIVE_PROJECTILES:
+            _drop_oldest(_active_projectiles)
         _active_projectiles.append(proj)
         proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
         proj.finished.connect(lambda p: show_explosion(p))
@@ -925,6 +1015,8 @@ def shoot_projectile_local_exit_left(start_global_pos: QPoint, vx: float, vy: fl
     except Exception as e:
         return f"Failed to start projectile: {e}"
 
+    if len(_active_projectiles) >= _MAX_ACTIVE_PROJECTILES:
+        _drop_oldest(_active_projectiles)
     _active_projectiles.append(proj)
     proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
     proj.show()
@@ -982,6 +1074,8 @@ def shoot_projectile_remote_arrive_right(
                 pass
             return
 
+        if len(_active_projectiles) >= _MAX_ACTIVE_PROJECTILES:
+            _drop_oldest(_active_projectiles)
         _active_projectiles.append(proj)
         proj.finished.connect(lambda _p, pr=proj: _active_projectiles.remove(pr) if pr in _active_projectiles else None)
         proj.finished.connect(lambda p: show_explosion(p))
@@ -1011,6 +1105,8 @@ def shoot_cannon_to(
     except Exception as e:
         return f"Failed to start cannonball: {e}"
 
+    if len(_active_cannonballs) >= _MAX_ACTIVE_CANNONBALLS:
+        _drop_oldest(_active_cannonballs)
     _active_cannonballs.append(ball)
     ball.finished.connect(lambda _p, b=ball: _active_cannonballs.remove(b) if b in _active_cannonballs else None)
 
@@ -1080,8 +1176,8 @@ class ControlPanel(QWidget):
 
         # Network status / log
         root.addWidget(QLabel("Network Status / Log:"))
-        # self.lbl_net_status = QLabel("-")
-        # root.addWidget(self.lbl_net_status)
+        self.lbl_net_status = QLabel("-")
+        root.addWidget(self.lbl_net_status)
 
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
