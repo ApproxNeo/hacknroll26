@@ -1,11 +1,15 @@
 import sys
 import socket
+import threading
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject, QDateTime
 from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox, QLineEdit, QTextEdit
 from PySide6.QtNetwork import QTcpServer, QTcpSocket, QHostAddress
+
+from zeroconf import Zeroconf, ServiceInfo, ServiceBrowser, ServiceStateChange
 
 
 class MessageServer(QObject):
@@ -28,8 +32,6 @@ class MessageServer(QObject):
             self.status_changed.emit(f"Server listening on {host}:{port}")
         else:
             self.status_changed.emit(f"Server failed to listen on {host}:{port} ({self._server.errorString()})")
-            
-        print(f"Server listening on {host}:{port}, success: {ok}")
         return bool(ok)
 
     def stop(self):
@@ -113,6 +115,97 @@ class MessageClient(QObject):
         while b"\n" in self._rx_buf:
             line, self._rx_buf = self._rx_buf.split(b"\n", 1)
             self.message_received.emit(line.decode("utf-8", errors="replace"))
+
+
+# ---- Zeroconf P2P ----
+
+class ZeroConfP2P(QObject):
+    peer_found = Signal(str, str, int)  # (name, host, port)
+    status_changed = Signal(str)
+
+    SERVICE_TYPE = "_catclick._tcp.local."
+
+    def __init__(self, port: int, instance_name: str | None = None, parent=None):
+        super().__init__(parent)
+        self.port = int(port)
+        self.instance_id = (instance_name or str(uuid.uuid4()))
+        self._zc: Zeroconf | None = None
+        self._browser: ServiceBrowser | None = None
+        self._info: ServiceInfo | None = None
+        self._closed = False
+
+    def start(self):
+        if self._zc is not None:
+            return
+        self._zc = Zeroconf()
+
+        # Advertise this instance
+        host_ip = get_lan_ip()
+        service_name = f"CatClick-{self.instance_id}.{self.SERVICE_TYPE}"
+        props = {b"instance_id": self.instance_id.encode("utf-8")}
+        self._info = ServiceInfo(
+            type_=self.SERVICE_TYPE,
+            name=service_name,
+            addresses=[socket.inet_aton(host_ip)],
+            port=self.port,
+            properties=props,
+            server=f"catclick-{self.instance_id}.local.",
+        )
+        try:
+            self._zc.register_service(self._info)
+            self.status_changed.emit(f"Zeroconf advertising {service_name} ({host_ip}:{self.port})")
+        except Exception as e:
+            self.status_changed.emit(f"Zeroconf advertise failed: {e}")
+
+        # Discover peers
+        self._browser = ServiceBrowser(self._zc, self.SERVICE_TYPE, handlers=[self._on_service_state_change])
+        self.status_changed.emit(f"Zeroconf browsing {self.SERVICE_TYPE}")
+        print("Zeroconf started at "f"{host_ip}:{self.port} with instance ID {self.instance_id}")
+
+    def close(self):
+        self._closed = True
+        if self._zc is None:
+            return
+        try:
+            if self._info is not None:
+                self._zc.unregister_service(self._info)
+        except Exception:
+            pass
+        try:
+            self._zc.close()
+        except Exception:
+            pass
+        self._zc = None
+        self._browser = None
+        self._info = None
+        self.status_changed.emit("Zeroconf stopped")
+
+    def _on_service_state_change(self, zeroconf: Zeroconf, service_type: str, name: str, state_change: ServiceStateChange):
+        if self._closed:
+            return
+        if state_change != ServiceStateChange.Added:
+            return
+
+        # Resolve in a thread so we don't block callbacks
+        def _resolve():
+            try:
+                info = zeroconf.get_service_info(service_type, name, timeout=2000)
+                if not info:
+                    return
+                props = info.properties or {}
+                peer_id = props.get(b"instance_id", b"").decode("utf-8", errors="ignore")
+                if peer_id == self.instance_id:
+                    return  # ignore ourselves
+                host = _first_ipv4(list(info.addresses))
+                if not host:
+                    return
+                port = int(info.port)
+                self.status_changed.emit(f"Peer discovered: {name} ({host}:{port})")
+                self.peer_found.emit(name, host, port)
+            except Exception as e:
+                self.status_changed.emit(f"Peer resolve failed: {e}")
+
+        threading.Thread(target=_resolve, daemon=True).start()
 
 
 class SpriteOverlay(QWidget):
@@ -350,14 +443,24 @@ def load_frames(folder: str) -> list[QPixmap]:
         raise RuntimeError("No valid PNG frames found in ./frames")
     return frames
 
-def get_lan_ip():
+
+def get_lan_ip() -> str:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         # Doesn't send traffic; just asks OS to choose a route/interface
         s.connect(("8.8.8.8", 80))
         return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
     finally:
         s.close()
+
+
+def _first_ipv4(addresses: list[bytes]) -> str | None:
+    for a in addresses or []:
+        if len(a) == 4:
+            return socket.inet_ntoa(a)
+    return None
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
@@ -368,24 +471,42 @@ if __name__ == "__main__":
     w.move(200, 200)
     w.show()
 
+    # Listen on all interfaces so peers can connect.
     server = MessageServer()
     client = MessageClient()
+    server.start(get_lan_ip(), 50505)
 
-    ip = get_lan_ip()
-    print(f"LAN IP address detected as: {ip}")
-    
-    # Default: run both server + client locally so clicks can be tested immediately.
-    server.start(ip, 50505)
-    client.connect_to(ip, 50505)
+    # Zeroconf peer discovery + advertising.
+    zc = ZeroConfP2P(port=50505)
+    zc.start()
 
-    # When the cat is clicked, send a message through the client.
+    # Auto-connect client to the first discovered peer (if not already connected).
+    _connected_to: tuple[str, int] | None = None
+
+    def on_peer(name: str, host: str, port: int):
+        if _connected_to == (host, port):
+            return
+        _connected_to = (host, port)
+        client.connect_to(host, port)
+
+    zc.peer_found.connect(on_peer)
+
+    # Clean up zeroconf on exit.
+    app.aboutToQuit.connect(zc.close)
+
+    # When the cat is clicked, send a message through the client and server.
     def on_cat_clicked(global_pos: QPoint):
         msg = f"CAT_CLICK at {global_pos.x()},{global_pos.y()}"
+        # Send to peers connected to our server
+        server.broadcast(msg)
+        # Send to a peer we connected to as a client
         client.send(msg)
 
     w.clicked.connect(on_cat_clicked)
 
     panel = ControlPanel(w, server, client, initial_fps=12)
     panel.show()
+
+    zc.status_changed.connect(panel._append_log)
 
     sys.exit(app.exec())
