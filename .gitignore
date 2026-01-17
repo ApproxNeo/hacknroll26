@@ -1,0 +1,14 @@
+# Python virtual environment
+venv/
+.env/
+.venv/
+
+# Byte-compiled files
+__pycache__/
+*.pyc
+
+bin/
+lib*/
+site-packages/
+
+pyvenv.cfg
