@@ -876,27 +876,21 @@ def _first_ipv4(addresses: list[bytes]) -> str:
 _connected_to: tuple[str, int] = None
 
 
-# When the cat is clicked, shoot OUT of this screen locally, and send the shot to peers.
+# When the cat is clicked, assume THIS machine is on the LEFT and the peer is on the RIGHT.
+# The cannonball always travels left -> right: exits this screen to the right, then arrives
+# from the left edge and lands on the other screen.
 def on_cat_clicked(global_pos: QPoint):
     # Target (where the remote will see it land).
     nx, ny = _norm_point(global_pos)
 
-    # Choose a stable "fire direction" based on where the cat is relative to screen center.
-    vx = nx - 0.5
-    vy = ny - 0.5
-
-    import math
-    mag = math.hypot(vx, vy)
-    if mag < 1e-6:
-        vx, vy = 1.0, 0.0
-    else:
-        vx, vy = vx / mag, vy / mag
+    # Force direction to left -> right.
+    vx, vy = 1.0, 0.0
 
     data = {"action": "cannon", "nx": nx, "ny": ny, "vx": vx, "vy": vy}
     msg = json.dumps(data)
 
-    # Local effect: start at the cat and exit the local screen (no explosion).
-    step_px = 220
+    # Local effect: start at the cat and exit the local screen to the right (no explosion).
+    step_px = 240
     through = QPoint(int(global_pos.x() + vx * step_px), int(global_pos.y() + vy * step_px))
     offscreen_end = _extend_line_offscreen(global_pos, through)
     shoot_cannon_to(offscreen_end, start_global_pos=global_pos, explode_on_land=False)
