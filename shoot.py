@@ -26,6 +26,7 @@ BASE_DIR = Path(__file__).resolve().parent
 ASSET_DIR = BASE_DIR / "assets"
 EXPLOSION_GIF = ASSET_DIR / "anims/explode.gif"
 EXPLOSION_MP3 = ASSET_DIR / "sounds/explode.mp3"
+PEW_MP3 = ASSET_DIR / "sounds/pew.mp3"
 PROJECTILE_PNG = ASSET_DIR / "sprites/projectile.png"
 SETTINGS_PATH = BASE_DIR / "control_panel_settings.json"
 
@@ -92,6 +93,9 @@ CAT_EDGE_INSET_TOP: int = 23
 CAT_EDGE_INSET_LEFT: int = 78
 CAT_EDGE_INSET_RIGHT: int = 78
 CAT_EDGE_INSET_BOTTOM: int = 0
+
+# Shooting animation length (in anim ticks; anim timer runs ~200ms).
+_SHOOT_ANIM_TICKS = 5
 
 
 def _get_projectile_pixmap(target_size: int) -> QPixmap:
@@ -239,6 +243,9 @@ class Cat:
 
         # Animation
         self.anim_frame = 0
+
+        # Shooting animation (countdown ticks)
+        self.shoot_anim = 0
 
         # Teleport timer
         self.teleport_timer = random.randint(8000, 15000)
@@ -647,6 +654,15 @@ class Cat:
         """Update animation frame"""
         if not self.is_jumping:
             self.anim_frame = (self.anim_frame + 1) % 4
+        if self.shoot_anim > 0:
+            self.shoot_anim -= 1
+
+    def trigger_shoot(self, ticks: int = _SHOOT_ANIM_TICKS):
+        try:
+            ticks = int(ticks)
+        except Exception:
+            ticks = _SHOOT_ANIM_TICKS
+        self.shoot_anim = max(self.shoot_anim, max(1, ticks))
 
 
 class CatOverlay(QWidget):
@@ -762,7 +778,7 @@ class CatOverlay(QWidget):
 
     def set_speed(self, speed: int):
         speed = max(0, int(speed))
-        self.speed_mag = speed if speed > 0 else 3
+        self.speed_mag = speed if speed > 0 else 1
 
     def set_click_through(self, enabled: bool):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, bool(enabled))
@@ -806,6 +822,90 @@ class CatOverlay(QWidget):
             return self.mapToGlobal(local)
         except Exception:
             return self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))
+
+    def random_cat_center_global_with_cat(self) -> tuple[Cat, QPoint]:
+        """Return a (cat, global_center) pair for a random cat."""
+        try:
+            if not getattr(self, "cats", None):
+                return None, self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))
+            cat = random.choice(self.cats)
+            local = QPoint(int(cat.x + cat.width / 2), int(cat.y + cat.height / 2))
+            return cat, self.mapToGlobal(local)
+        except Exception:
+            return None, self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))
+
+    def trigger_shoot(self, cat: Cat, ticks: int = _SHOOT_ANIM_TICKS):
+        if cat is None:
+            return
+        try:
+            cat.trigger_shoot(ticks)
+        except Exception:
+            pass
+        self.update()
+
+    def trigger_shoot_near_global(self, global_pos: QPoint, ticks: int = _SHOOT_ANIM_TICKS):
+        if not getattr(self, "cats", None):
+            return
+        try:
+            local_pos = self.mapFromGlobal(global_pos)
+        except Exception:
+            return
+        best_cat = None
+        best_dist = None
+        for cat in self.cats:
+            cx = cat.x + cat.width / 2
+            cy = cat.y + cat.height / 2
+            dx = cx - local_pos.x()
+            dy = cy - local_pos.y()
+            d2 = dx * dx + dy * dy
+            if best_dist is None or d2 < best_dist:
+                best_dist = d2
+                best_cat = cat
+        if best_cat is not None:
+            self.trigger_shoot(best_cat, ticks)
+
+    def cannon_muzzle_global(self, cat: Cat) -> QPoint:
+        if cat is None:
+            return self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))
+
+        w, h = cat.width, cat.height
+        cx = w / 2.0
+        cy = h / 2.0 + 10.0
+
+        breath = math.sin(cat.anim_frame * 0.15) * 2.0
+        body_y = cy + 15.0
+        cannon_y = body_y + 10.0 + breath
+
+        barrel_len = 38.0
+        barrel_x = cx + 6.0
+
+        muzzle_x = barrel_x + barrel_len
+        muzzle_y = cannon_y
+
+        # Apply facing flip (same transform as draw)
+        if cat.facing < 0:
+            muzzle_x = w - muzzle_x
+
+        # Apply edge rotation around center
+        angle = 0.0
+        if cat.edge == Cat.TOP:
+            angle = 180.0
+        elif cat.edge == Cat.LEFT:
+            angle = 90.0
+        elif cat.edge == Cat.RIGHT:
+            angle = -90.0
+
+        if angle != 0.0:
+            rad = math.radians(angle)
+            dx = muzzle_x - (w / 2.0)
+            dy = muzzle_y - (h / 2.0)
+            rx = dx * math.cos(rad) - dy * math.sin(rad)
+            ry = dx * math.sin(rad) + dy * math.cos(rad)
+            muzzle_x = (w / 2.0) + rx
+            muzzle_y = (h / 2.0) + ry
+
+        local = QPoint(int(cat.x + muzzle_x), int(cat.y + muzzle_y))
+        return self.mapToGlobal(local)
 
     def shutdown(self):
         """Clean shutdown: stop timers, clear cats, close overlay"""
@@ -864,6 +964,9 @@ class CatOverlay(QWidget):
         painter.setPen(QPen(outline, 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
 
         breath = math.sin(cat.anim_frame * 0.15) * 2
+
+        shooting = cat.shoot_anim > 0
+        shoot_phase = int(cat.shoot_anim) if shooting else 0
 
         cx, cy = w // 2, h // 2 + 10
 
@@ -966,12 +1069,85 @@ class CatOverlay(QWidget):
         mouth_path.quadTo(cx + 2.5, mouth_y + 3, cx + 5, mouth_y)
         painter.drawPath(mouth_path)
 
+        if shooting:
+            # Cannon with recoil + muzzle flash + a cannonball exiting the barrel.
+            recoil = 0
+            if shoot_phase == _SHOOT_ANIM_TICKS - 1:
+                recoil = 4
+            elif shoot_phase <= _SHOOT_ANIM_TICKS - 2:
+                recoil = 2
+
+            cannon_y = body_y + 10 + breath
+            barrel_len = 38
+            barrel_thick = 13
+            barrel_x = cx + 6 - recoil
+
+            # Tilt the cannon upwards to follow the arc.
+            tilt_deg = -18
+
+            painter.save()
+            painter.translate(barrel_x, cannon_y)
+            painter.rotate(tilt_deg)
+            painter.translate(-barrel_x, -cannon_y)
+
+            barrel_rect = QRect(int(barrel_x), int(cannon_y - barrel_thick / 2), int(barrel_len), int(barrel_thick))
+            painter.setPen(QPen(outline, 2))
+            painter.setBrush(QBrush(QColor(60, 60, 70)))
+            painter.drawRoundedRect(barrel_rect, 4, 4)
+
+            # Cannonball travel: starts inside the barrel, moves out over the first frames.
+            travel = (_SHOOT_ANIM_TICKS - shoot_phase) / float(_SHOOT_ANIM_TICKS)
+            travel = max(0.0, min(1.0, travel))
+            ball_r = 7
+            ball_start_x = barrel_x + 8
+            ball_end_x = barrel_x + barrel_len + 20
+            ball_x = ball_start_x + (ball_end_x - ball_start_x) * (travel ** 0.7)
+            ball_y = cannon_y - 1
+            painter.setBrush(QBrush(QColor(80, 80, 90)))
+            painter.setPen(QPen(outline, 1.5))
+            painter.drawEllipse(int(ball_x - ball_r), int(ball_y - ball_r), ball_r * 2, ball_r * 2)
+
+            # Muzzle flash only on the first frame of the shot.
+            if shoot_phase == _SHOOT_ANIM_TICKS:
+                flash = QPolygon([
+                    QPoint(int(barrel_x + barrel_len + 2), int(cannon_y - 4)),
+                    QPoint(int(barrel_x + barrel_len + 20), int(cannon_y - 12)),
+                    QPoint(int(barrel_x + barrel_len + 12), int(cannon_y + 2)),
+                    QPoint(int(barrel_x + barrel_len + 20), int(cannon_y + 14)),
+                    QPoint(int(barrel_x + barrel_len + 2), int(cannon_y + 8)),
+                ])
+                painter.setBrush(QBrush(QColor(255, 210, 80)))
+                painter.setPen(QPen(QColor(255, 150, 40), 2))
+                painter.drawPolygon(flash)
+
+            # Smoke puffs trailing the shot.
+            if shoot_phase <= _SHOOT_ANIM_TICKS - 1:
+                puff_alpha = 140 if shoot_phase >= _SHOOT_ANIM_TICKS - 2 else 90
+                puff_color = QColor(200, 200, 200, puff_alpha)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(puff_color))
+                puff_x = barrel_x + barrel_len + 8 + (1.0 - travel) * 8
+                painter.drawEllipse(int(puff_x), int(cannon_y - 12), 14, 14)
+                painter.drawEllipse(int(puff_x + 8), int(cannon_y - 4), 10, 10)
+
+            painter.restore()
+
+            wheel_r = 8
+            painter.setBrush(QBrush(QColor(90, 90, 100)))
+            painter.drawEllipse(int(barrel_x - 8), int(cannon_y + 6), wheel_r * 2, wheel_r * 2)
+
         painter.setPen(QPen(outline, 2.5))
         painter.setBrush(QBrush(white))
 
         paw_y = body_y + 15 + breath
-        painter.drawEllipse(int(cx - 15), int(paw_y), 12, 12)
-        painter.drawEllipse(int(cx + 3), int(paw_y), 12, 12)
+        paw_left_x = cx - 15
+        paw_right_x = cx + 3
+        if shooting:
+            paw_y = body_y + 10 + breath
+            paw_left_x = cx - 18
+            paw_right_x = cx + 8
+        painter.drawEllipse(int(paw_left_x), int(paw_y), 12, 12)
+        painter.drawEllipse(int(paw_right_x), int(paw_y), 12, 12)
 
         foot_y = body_y + body_h - 8
         painter.setBrush(QBrush(white))
@@ -1497,11 +1673,10 @@ def _drop_oldest(overlays: list):
 
 _EXPLODE_PROCS: list[subprocess.Popen] = []
 _EXPLODE_MAX_SIMULTANEOUS = 4
+_PEW_PROCS: list[subprocess.Popen] = []
+_PEW_MAX_SIMULTANEOUS = 6
 
-_SFX_READY = True
-_SFX_PLAYERS = []  # list[QMediaPlayer]
-_SFX_AUDIO = []    # list[QAudioOutput]
-_SFX_RR = 0
+_SFX_POOLS: dict[str, dict] = {}
 
 # If QtMultimedia backend is broken on this system (common on some Linux/PipeWire setups),
 # disable it at runtime and fall back to OS playback.
@@ -1517,73 +1692,119 @@ def _disable_qt_sfx(reason: str):
     _QT_SFX_DISABLE_REASON = str(reason or "")
     try:
         # Best-effort: stop any players so we don't hang on a broken backend.
-        for p in list(_SFX_PLAYERS):
+        for pool in list(_SFX_POOLS.values()):
+            players = pool.get("players", [])
             try:
-                p.stop()
+                for p in list(players):
+                    try:
+                        p.stop()
+                    except Exception:
+                        pass
             except Exception:
                 pass
     except Exception:
         pass
 
 
-def _preload_explosion_sound() -> bool:
-    """Preload explosion audio for low-latency playback (best-effort)."""
-    global _SFX_READY, _SFX_PLAYERS, _SFX_AUDIO
+def _get_sfx_pool(key: str, max_simultaneous: int) -> dict:
+    pool = _SFX_POOLS.get(key)
+    if pool is None:
+        pool = {
+            "ready": False,
+            "players": [],
+            "audio": [],
+            "rr": 0,
+            "max": max(1, int(max_simultaneous)),
+        }
+        _SFX_POOLS[key] = pool
+    return pool
 
-    if _SFX_READY:
+
+def _preload_sfx(sound_path: Path, max_simultaneous: int, key: str) -> bool:
+    """Preload audio for low-latency playback (best-effort)."""
+    pool = _get_sfx_pool(key, max_simultaneous)
+
+    if pool.get("ready"):
         return True
-    if not EXPLOSION_MP3.exists():
+    if not sound_path.exists():
         return False
     if not _QT_AUDIO_AVAILABLE:
         return False
 
     try:
-        url = QUrl.fromLocalFile(str(EXPLOSION_MP3))
-        # Pre-create a small pool so multiple explosions can overlap.
-        for _ in range(_EXPLODE_MAX_SIMULTANEOUS):
+        url = QUrl.fromLocalFile(str(sound_path))
+        for _ in range(pool["max"]):
             out = QAudioOutput()
             out.setVolume(0.9)
             p = QMediaPlayer()
             p.setAudioOutput(out)
             p.setSource(url)
 
-            # If the backend errors (e.g. PipeWire sync timeouts), disable Qt SFX and fall back.
             try:
-                # PySide6: errorOccurred(QMediaPlayer.Error, str)
                 p.errorOccurred.connect(lambda err, err_str, _p=p: _disable_qt_sfx(f"QMediaPlayer error: {err_str}"))
             except Exception:
-                # Some builds expose different signal shapes; ignore and rely on try/except in play.
                 pass
 
-            _SFX_AUDIO.append(out)
-            _SFX_PLAYERS.append(p)
+            pool["audio"].append(out)
+            pool["players"].append(p)
 
-        _SFX_READY = True
+        pool["ready"] = True
         return True
     except Exception:
-        _SFX_PLAYERS = []
-        _SFX_AUDIO = []
-        _SFX_READY = False
+        pool["players"] = []
+        pool["audio"] = []
+        pool["ready"] = False
         return False
 
 
-def _play_explosion_sound():
-    """Best-effort, non-blocking playback of explode.mp3.
+def _spawn_sfx_process(sound_path: Path, procs: list[subprocess.Popen], max_simultaneous: int):
+    try:
+        procs[:] = [p for p in procs if p is not None and p.poll() is None]
+        if len(procs) >= max_simultaneous:
+            procs[:] = procs[-(max_simultaneous - 1):]
 
-    Uses QtMultimedia when available (lower startup latency than spawning a process).
-    Falls back to OS tools if QtMultimedia isn't available.
-    """
-    global _EXPLODE_PROCS, _SFX_RR
+        proc = None
+        if sys.platform == "darwin":
+            proc = subprocess.Popen(
+                ["afplay", str(sound_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        elif sys.platform.startswith("win"):
+            proc = subprocess.Popen(
+                ["cmd", "/c", "start", "", str(sound_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            for cmd in (["paplay"], ["pw-play"], ["aplay"], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error"], ["xdg-open"]):
+                try:
+                    proc = subprocess.Popen(
+                        cmd + [str(sound_path)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    break
+                except Exception:
+                    proc = None
 
-    if not EXPLOSION_MP3.exists():
+        if proc is not None:
+            procs.append(proc)
+    except Exception:
+        pass
+
+
+def _play_sfx(sound_path: Path, max_simultaneous: int, key: str, procs: list[subprocess.Popen]):
+    """Best-effort, non-blocking playback for a sound file."""
+    if not sound_path.exists():
         return
 
-    # Low-latency path: QtMultimedia
-    if (not _QT_SFX_DISABLED) and _preload_explosion_sound() and _SFX_PLAYERS:
+    pool = _get_sfx_pool(key, max_simultaneous)
+
+    if (not _QT_SFX_DISABLED) and _preload_sfx(sound_path, max_simultaneous, key) and pool["players"]:
         try:
-            # Round-robin: always play on the next player, restarting if currently playing.
-            p = _SFX_PLAYERS[_SFX_RR % len(_SFX_PLAYERS)]
-            _SFX_RR = (_SFX_RR + 1) % len(_SFX_PLAYERS)
+            p = pool["players"][pool["rr"] % len(pool["players"])]
+            pool["rr"] = (pool["rr"] + 1) % len(pool["players"])
             try:
                 p.stop()
             except Exception:
@@ -1595,51 +1816,27 @@ def _play_explosion_sound():
             p.play()
             return
         except Exception as e:
-            # If QtMultimedia fails at runtime, disable it and drop through to OS fallback.
             _disable_qt_sfx(f"QtMultimedia play failed: {e}")
 
-    # Fallback: spawn an OS player process (higher latency)
-    try:
-        # Prune finished processes.
-        _EXPLODE_PROCS = [p for p in _EXPLODE_PROCS if p is not None and p.poll() is None]
+    _spawn_sfx_process(sound_path, procs, max_simultaneous)
 
-        # If we're already playing many at once, drop the oldest reference (do not terminate)
-        # to avoid unbounded growth. (Process will finish on its own.)
-        if len(_EXPLODE_PROCS) >= _EXPLODE_MAX_SIMULTANEOUS:
-            _EXPLODE_PROCS = _EXPLODE_PROCS[-(_EXPLODE_MAX_SIMULTANEOUS - 1):]
 
-        proc = None
-        if sys.platform == "darwin":
-            # macOS: afplay is available by default.
-            proc = subprocess.Popen(
-                ["afplay", str(EXPLOSION_MP3)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        elif sys.platform.startswith("win"):
-            # Windows: open with default associated app (best-effort).
-            proc = subprocess.Popen(
-                ["cmd", "/c", "start", "", str(EXPLOSION_MP3)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        else:
-            # Linux / others: try common players or xdg-open.
-            for cmd in (["paplay"], ["pw-play"], ["aplay"], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error"], ["xdg-open"]):
-                try:
-                    proc = subprocess.Popen(
-                        cmd + [str(EXPLOSION_MP3)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    break
-                except Exception:
-                    proc = None
+def _preload_explosion_sound() -> bool:
+    return _preload_sfx(EXPLOSION_MP3, _EXPLODE_MAX_SIMULTANEOUS, "explode")
 
-        if proc is not None:
-            _EXPLODE_PROCS.append(proc)
-    except Exception:
-        pass
+
+def _preload_pew_sound() -> bool:
+    return _preload_sfx(PEW_MP3, _PEW_MAX_SIMULTANEOUS, "pew")
+
+
+def _play_explosion_sound():
+    """Best-effort, non-blocking playback of explode.mp3."""
+    _play_sfx(EXPLOSION_MP3, _EXPLODE_MAX_SIMULTANEOUS, "explode", _EXPLODE_PROCS)
+
+
+def _play_pew_sound():
+    """Best-effort, non-blocking playback of pew.mp3."""
+    _play_sfx(PEW_MP3, _PEW_MAX_SIMULTANEOUS, "pew", _PEW_PROCS)
 
 def show_explosion(global_pos: QPoint) -> str:
     gif_path = EXPLOSION_GIF
@@ -2404,7 +2601,22 @@ class ControlPanel(QWidget):
 
     def _shoot(self):
         # Fire from a random cat (if overlay supports it); otherwise use overlay center.
-        if hasattr(self.overlay, "random_cat_center_global"):
+        if hasattr(self.overlay, "random_cat_center_global_with_cat"):
+            try:
+                cat, center_global = self.overlay.random_cat_center_global_with_cat()
+                if cat is not None:
+                    try:
+                        self.overlay.trigger_shoot(cat)
+                    except Exception:
+                        pass
+                    try:
+                        center_global = self.overlay.cannon_muzzle_global(cat)
+                    except Exception:
+                        pass
+            except Exception:
+                center_local = QPoint(self.overlay.width() // 2, self.overlay.height() // 2)
+                center_global = self.overlay.mapToGlobal(center_local)
+        elif hasattr(self.overlay, "random_cat_center_global"):
             try:
                 center_global = self.overlay.random_cat_center_global()
             except Exception:
@@ -2417,6 +2629,12 @@ class ControlPanel(QWidget):
             # Stop moving briefly while shooting.
             try:
                 self.overlay.pause_for_shot(350)
+            except Exception:
+                pass
+
+            try:
+                if hasattr(self.overlay, "trigger_shoot_near_global"):
+                    self.overlay.trigger_shoot_near_global(center_global)
             except Exception:
                 pass
 
@@ -2480,6 +2698,8 @@ _connected_to: tuple[str, int] = None
 # from the cat's origin.
 def on_cat_clicked(global_pos: QPoint):
     global _SHOOT_DIRECTION
+
+    _play_pew_sound()
 
     # Sender cat origin in normalized coordinates.
     sx, sy = _norm_point(global_pos)
@@ -2587,8 +2807,9 @@ def on_cat_clicked(global_pos: QPoint):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    # Preload explosion audio to avoid first-play lag.
+    # Preload audio to avoid first-play lag.
     _preload_explosion_sound()
+    _preload_pew_sound()
 
     # frames = load_frames("frames")
     w = CatOverlay()
@@ -2630,10 +2851,26 @@ if __name__ == "__main__":
     def _hotkey_shoot():
         # Fire from the sprite overlay's current center position.
         # center_local = QPoint(w.width() // 2, w.height() // 2)
-        center_global = w.random_cat_center_global()
+        try:
+            cat, center_global = w.random_cat_center_global_with_cat()
+            if cat is not None:
+                try:
+                    w.trigger_shoot(cat)
+                except Exception:
+                    pass
+                try:
+                    center_global = w.cannon_muzzle_global(cat)
+                except Exception:
+                    pass
+        except Exception:
+            center_global = w.random_cat_center_global()
         try:
             try:
                 w.pause_for_shot(350)
+            except Exception:
+                pass
+            try:
+                w.trigger_shoot_near_global(center_global)
             except Exception:
                 pass
             on_cat_clicked(center_global)
