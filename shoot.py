@@ -2397,6 +2397,7 @@ class ControlPanel(QWidget):
         self._settings_reload_timer.timeout.connect(self._reload_settings_if_changed)
         self._settings_reload_timer.start(5000)  # Reload every 5 seconds
         self._last_settings_mtime = 0
+        self._last_settings_text = None
 
     def _run_action(self, action_str: str):
         action_json = action_str.strip()
@@ -2545,8 +2546,11 @@ class ControlPanel(QWidget):
             
             # If file has been modified since last check
             if current_mtime > self._last_settings_mtime:
-                self._last_settings_mtime = current_mtime
-                self._load_settings()
+                current_text = self._settings_path.read_text(encoding="utf-8")
+                if current_text != self._last_settings_text:
+                    self._last_settings_text = current_text
+                    self._last_settings_mtime = current_mtime
+                    self._load_settings()
                 # self._append_log("Settings reloaded from file")
         except Exception as e:
             # Don't spam the log with errors on every failed check
