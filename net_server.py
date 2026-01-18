@@ -31,6 +31,15 @@ def handle_post(id):
 @app.route('/<string:id>', methods=['GET'])
 def handle_get(id):
     retrieved_user = User.get(id=id)
+    
+    if len(id) != 14:
+        return {"message": "invalid length"}
+    
+    try:
+        num = int(id)
+    except:
+        return {"message": "invalid id"}
+    
     if retrieved_user:
         return jsonify(retrieved_user.settings)
     else:
@@ -51,4 +60,4 @@ def handle_get(id):
 # Run the application
 if __name__ == '__main__':
     # Running on port 5000 by default, with debug mode enabled for development
-    app.run(debug=True)
+    app.run(host="0.0.0.0", debug=True)
