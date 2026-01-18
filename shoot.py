@@ -258,7 +258,7 @@ class Cat:
         if speed_mag == 0:
             return
 
-        self.speed = max(3, speed_mag)  # Ensure minimum speed
+        self.speed = max(1, speed_mag)  # Ensure minimum speed
         self.teleport_timer -= 16
 
         # Ensure facing is never 0
@@ -844,6 +844,9 @@ class CatOverlay(QWidget):
         except Exception:
             return None, self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))
 
+    def has_cats(self) -> bool:
+        return bool(getattr(self, "cats", None))
+
     def trigger_shoot(self, cat: Cat, ticks: int = _SHOOT_ANIM_TICKS):
         if cat is None:
             return
@@ -1191,6 +1194,8 @@ class CatOverlay(QWidget):
     def mousePressEvent(self, event):
         """Handle clicks on cats"""
         click_pos = event.position().toPoint()
+        if not self.has_cats():
+            return
         for cat in self.cats:
             cat_rect = self._cat_hit_rect(cat)
             if cat_rect.contains(click_pos):
@@ -2481,7 +2486,14 @@ class ControlPanel(QWidget):
         root.addLayout(shoot_row)
 
         # Network status / log
-        root.addWidget(QLabel("Network Status / Log:"))
+        net_header = QHBoxLayout()
+        net_header.addWidget(QLabel("Network Status / Log:"))
+        net_header.addStretch(1)
+        self.btn_toggle_netlog = QPushButton("Hide")
+        self.btn_toggle_netlog.clicked.connect(self._toggle_netlog)
+        net_header.addWidget(self.btn_toggle_netlog)
+        root.addLayout(net_header)
+
         self.lbl_net_status = QLabel("-")
         root.addWidget(self.lbl_net_status)
 
@@ -2614,6 +2626,12 @@ class ControlPanel(QWidget):
         self.lbl_net_status.setText(text)
         self.txt_log.append(line)
 
+    def _toggle_netlog(self):
+        is_visible = self.lbl_net_status.isVisible()
+        self.lbl_net_status.setVisible(not is_visible)
+        self.txt_log.setVisible(not is_visible)
+        self.btn_toggle_netlog.setText("Hide" if not is_visible else "Show")
+
     def _on_visible(self, visible: bool):
         if visible:
             self.overlay.show()
@@ -2725,6 +2743,9 @@ class ControlPanel(QWidget):
 
     def _shoot(self):
         # Fire from a random cat (if overlay supports it); otherwise use overlay center.
+        if not getattr(self.overlay, "has_cats", lambda: True)():
+            self._append_log("No cats to shoot from")
+            return
         if hasattr(self.overlay, "random_cat_center_global_with_cat"):
             try:
                 cat, center_global = self.overlay.random_cat_center_global_with_cat()
@@ -2821,6 +2842,9 @@ def _first_ipv4(addresses: list[bytes]) -> str:
 # from the cat's origin.
 def on_cat_clicked(global_pos: QPoint):
     global _SHOOT_DIRECTION
+
+    if _CAT_OVERLAY is not None and not getattr(_CAT_OVERLAY, "has_cats", lambda: True)():
+        return
 
     _play_pew_sound()
 
@@ -2970,17 +2994,20 @@ if __name__ == "__main__":
     def _hotkey_shoot():
         # Fire from the sprite overlay's current center position.
         # center_local = QPoint(w.width() // 2, w.height() // 2)
+        if not getattr(w, "has_cats", lambda: True)():
+            return
         try:
             cat, center_global = w.random_cat_center_global_with_cat()
-            if cat is not None:
-                try:
-                    w.trigger_shoot(cat)
-                except Exception:
-                    pass
-                try:
-                    center_global = w.cannon_muzzle_global(cat)
-                except Exception:
-                    pass
+            if cat is None:
+                return
+            try:
+                w.trigger_shoot(cat)
+            except Exception:
+                pass
+            try:
+                center_global = w.cannon_muzzle_global(cat)
+            except Exception:
+                pass
         except Exception:
             center_global = w.random_cat_center_global()
         try:
