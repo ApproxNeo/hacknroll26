@@ -2113,7 +2113,9 @@ def _play_pew_sound():
     _play_sfx(PEW_MP3, _PEW_MAX_SIMULTANEOUS, "pew", _PEW_PROCS)
 
 def _play_yippie_sound():
-    _play_sfx(YIPPIE_MP3, _YIPPIE_MAX_SIMULTANEOUS, "yippie", _YIPPIE_PROCS)
+    # Use OS playback for yippie so QtMultimedia failures don't disable other SFX.
+    # This avoids yippie triggering _disable_qt_sfx() and cutting off other sounds.
+    _spawn_sfx_process(YIPPIE_MP3, _YIPPIE_PROCS, _YIPPIE_MAX_SIMULTANEOUS)
 
 def show_explosion(global_pos: QPoint) -> str:
     gif_path = EXPLOSION_GIF
