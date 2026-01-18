@@ -1219,6 +1219,10 @@ class CatOverlay(QWidget):
     def kill_cat(self, cat):
         """Remove a specific cat from the overlay"""
         if cat in self.cats:
+            try:
+                self._spawn_death_overlay(cat)
+            except Exception:
+                pass
             self.cats.remove(cat)
             self._update_window_mask()
             self.cats_multiplied.emit(len(self.cats))
@@ -1241,6 +1245,44 @@ class CatOverlay(QWidget):
                     pass
                 return True
         return False
+
+    def _spawn_death_overlay(self, cat: Cat):
+        if cat is None or self.shutting_down:
+            return
+
+        if len(_active_cat_deaths) >= _MAX_ACTIVE_CAT_DEATHS:
+            _drop_oldest(_active_cat_deaths)
+
+        angle = 0.0
+        if cat.edge == Cat.TOP:
+            angle = 180.0
+        elif cat.edge == Cat.LEFT:
+            angle = 90.0
+        elif cat.edge == Cat.RIGHT:
+            angle = -90.0
+
+        center_local = QPoint(int(cat.x + self.cat_width / 2), int(cat.y + self.cat_height / 2))
+        center_global = self.mapToGlobal(center_local)
+
+        snap = _CatSnapshot(
+            anim_frame=getattr(cat, "anim_frame", 0),
+            shoot_anim=0,
+            facing=getattr(cat, "facing", 1),
+            edge=getattr(cat, "edge", Cat.BOTTOM),
+        )
+
+        size = max(int(self.cat_width), int(self.cat_height))
+        overlay = CatDeathOverlay(
+            lambda p, c: self._draw_cat(p, c),
+            snap,
+            center_global,
+            size=QSize(size, size),
+            cat_size=QSize(int(self.cat_width), int(self.cat_height)),
+            base_angle=angle,
+        )
+        _active_cat_deaths.append(overlay)
+        overlay.finished.connect(lambda ov=overlay: _active_cat_deaths.remove(ov) if ov in _active_cat_deaths else None)
+        overlay.show()
 
 
 class MessageClient(QObject):
@@ -1500,6 +1542,102 @@ class GifOverlay(QWidget):
         self.deleteLater()
 
 
+class _CatSnapshot:
+    def __init__(self, *, anim_frame: int, shoot_anim: int, facing: int, edge: int):
+        self.anim_frame = int(anim_frame)
+        self.shoot_anim = int(shoot_anim)
+        self.facing = int(facing) if int(facing) != 0 else 1
+        self.edge = int(edge)
+
+
+class CatDeathOverlay(QWidget):
+    finished = Signal()
+
+    def __init__(self, draw_fn, cat_snapshot: _CatSnapshot, center_global: QPoint, *, size: QSize, cat_size: QSize, base_angle: float = 0.0):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint |
+            Qt.WindowDoesNotAcceptFocus |
+            Qt.NoDropShadowWindowHint
+        )
+
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.NoFocus)
+
+        self._draw_fn = draw_fn
+        self._cat = cat_snapshot
+        self._size = QSize(size)
+        self._cat_size = QSize(cat_size)
+        self._base_angle = float(base_angle)
+        self._spin = random.choice([-1, 1]) * random.uniform(18.0, 32.0)
+        self._duration = 650
+        self._t0 = QDateTime.currentMSecsSinceEpoch()
+
+        w = self._size.width()
+        h = self._size.height()
+        self.resize(w, h)
+        cw = self._cat_size.width()
+        ch = self._cat_size.height()
+        self._offset_x = max(0, int((w - cw) / 2))
+        self._offset_y = max(0, int((h - ch) / 2))
+
+        x = int(center_global.x() - w / 2)
+        y = int(center_global.y() - h / 2)
+        self.move(x, y)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(16)
+
+    def _tick(self):
+        now = QDateTime.currentMSecsSinceEpoch()
+        if now - self._t0 >= self._duration:
+            self._timer.stop()
+            self.finished.emit()
+            self.close()
+            self.deleteLater()
+            return
+        self.update()
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+        now = QDateTime.currentMSecsSinceEpoch()
+        t = max(0.0, min(1.0, (now - self._t0) / float(self._duration)))
+        alpha = max(0.0, 1.0 - t)
+        scale = max(0.2, 1.0 - 0.65 * t)
+        drop = 26.0 * t
+        angle = self._base_angle + self._spin * t
+
+        cx = self.width() / 2.0
+        cy = self.height() / 2.0
+
+        painter.save()
+        painter.setOpacity(alpha)
+        painter.translate(cx, cy + drop)
+        painter.rotate(angle)
+        painter.scale(scale, scale)
+        painter.translate(-cx, -cy)
+
+        painter.translate(self._offset_x, self._offset_y)
+        try:
+            self._draw_fn(painter, self._cat)
+        except Exception:
+            pass
+        painter.restore()
+
+
 # ---- Cannonball Overlay ----
 
 class CannonBallOverlay(QWidget):
@@ -1751,11 +1889,13 @@ class ProjectileOverlay(QWidget):
 _active_cannonballs: list[CannonBallOverlay] = []
 _active_projectiles: list[ProjectileOverlay] = []
 _active_explosions: list[GifOverlay] = []
+_active_cat_deaths: list[CatDeathOverlay] = []
 
 # Caps to avoid lag if many projectiles/explosions are active at once.
 _MAX_ACTIVE_CANNONBALLS = 10
 _MAX_ACTIVE_PROJECTILES = 16
 _MAX_ACTIVE_EXPLOSIONS = 12
+_MAX_ACTIVE_CAT_DEATHS = 10
 
 
 def set_projectile_color(color: QColor):
