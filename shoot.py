@@ -643,11 +643,12 @@ class Cat:
         """Check if it's time to jump"""
         self.jump_cooldown -= 100
         if self.jump_cooldown <= 0 and not self.is_jumping:
-            if random.random() < 0.55:
+            if random.random() < 0.35:
                 self.jump_cooldown = random.randint(500, 1500)
                 self.is_jumping = True
                 # Jump direction depends on which edge the cat is on
                 jump_strength = random.randint(-20, -10)
+                _play_yippie_sound()
                 if self.edge == Cat.BOTTOM:
                     self.jump_vel = jump_strength  # Jump up (negative Y)
                 elif self.edge == Cat.TOP:
@@ -1944,6 +1945,9 @@ _EXPLODE_PROCS: list[subprocess.Popen] = []
 _EXPLODE_MAX_SIMULTANEOUS = 4
 _PEW_PROCS: list[subprocess.Popen] = []
 _PEW_MAX_SIMULTANEOUS = 6
+_YIPPIE_PROCS: list[subprocess.Popen] = []
+_YIPPIE_MAX_SIMULTANEOUS = 6
+
 
 _SFX_POOLS: dict[str, dict] = {}
 
@@ -2097,15 +2101,19 @@ def _preload_explosion_sound() -> bool:
 def _preload_pew_sound() -> bool:
     return _preload_sfx(PEW_MP3, _PEW_MAX_SIMULTANEOUS, "pew")
 
+def _preload_yippie_sound() -> bool:
+    return _preload_sfx(YIPPIE_MP3, _YIPPIE_MAX_SIMULTANEOUS, "yippie")
 
 def _play_explosion_sound():
     """Best-effort, non-blocking playback of explode.mp3."""
     _play_sfx(EXPLOSION_MP3, _EXPLODE_MAX_SIMULTANEOUS, "explode", _EXPLODE_PROCS)
 
-
 def _play_pew_sound():
     """Best-effort, non-blocking playback of pew.mp3."""
     _play_sfx(PEW_MP3, _PEW_MAX_SIMULTANEOUS, "pew", _PEW_PROCS)
+
+def _play_yippie_sound():
+    _play_sfx(YIPPIE_MP3, _YIPPIE_MAX_SIMULTANEOUS, "yippie", _YIPPIE_PROCS)
 
 def show_explosion(global_pos: QPoint) -> str:
     gif_path = EXPLOSION_GIF
@@ -3101,6 +3109,7 @@ if __name__ == "__main__":
     # Preload audio to avoid first-play lag.
     _preload_explosion_sound()
     _preload_pew_sound()
+    _preload_yippie_sound()
 
     # frames = load_frames("frames")
     w = CatOverlay()
