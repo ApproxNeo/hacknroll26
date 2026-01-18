@@ -1,4 +1,5 @@
 import sys
+import os
 import json
 import socket
 import threading
@@ -38,6 +39,7 @@ _PROJECTILE_TINTED: dict[tuple[int, int], QPixmap] = {}
 # Default colors (customizable via control panel).
 _PROJECTILE_COLOR = QColor(110, 110, 110)
 
+os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.ffmpeg*=false")
 
 def _parse_color(text: str) -> QColor:
     if not text:
