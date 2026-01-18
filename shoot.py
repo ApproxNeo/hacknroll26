@@ -23,6 +23,7 @@ except Exception:
 
 # Debounce global hotkey shots (avoid OS key repeat spam).
 _LAST_HOTKEY_SHOT_MS = 0
+_CAT_OVERLAY = None
 BASE_DIR = Path(__file__).resolve().parent
 ASSET_DIR = BASE_DIR / "assets"
 EXPLOSION_GIF = ASSET_DIR / "anims/explode.gif"
@@ -675,6 +676,8 @@ class CatOverlay(QWidget):
 
     def __init__(self):
         super().__init__()
+        global _CAT_OVERLAY
+        _CAT_OVERLAY = self
         self.cat_width = 300
         self.cat_height = 270
 
@@ -757,7 +760,7 @@ class CatOverlay(QWidget):
         if self.shutting_down:
             return
 
-        if len(self.cats) >= 3:
+        if len(self.cats) >= 5:
             return
 
         screen = self.geometry()
@@ -765,11 +768,13 @@ class CatOverlay(QWidget):
 
         new_cats = []
         for _ in range(spawn_count):
-            base = random.choice(self.cats)
+            base = random.choice(self.cats) if self.cats else None
+            base_x = base.x if base else screen.center().x()
+            base_y = base.y if base else screen.center().y()
             new_edge = Cat.BOTTOM # random.choice([Cat.BOTTOM, Cat.TOP, Cat.LEFT, Cat.RIGHT])
             new_cat = Cat(
-                base.x + random.randint(-20, 20),
-                base.y + random.randint(-20, 20),
+                base_x + random.randint(-20, 20),
+                base_y + random.randint(-20, 20),
                 new_edge,
             )
             new_cats.append(new_cat)
@@ -809,6 +814,9 @@ class CatOverlay(QWidget):
 
             if cat.hits_corner(screen):
                 self._multiply_cats()
+                
+        if not self.cats and random.random() < 0.01:
+            self._multiply_cats()
 
         self._update_window_mask()
 
@@ -948,6 +956,28 @@ class CatOverlay(QWidget):
 
             self._draw_cat(painter, cat)
             painter.restore()
+
+    def _cat_hit_rect(self, cat, extra: int = 0) -> QRect:
+        """Return a tighter hitbox for the visible cat sprite."""
+        try:
+            extra = int(extra)
+        except Exception:
+            extra = 0
+        extra = max(0, extra)
+
+        inset_left = int(CAT_EDGE_INSET_LEFT)
+        inset_right = int(CAT_EDGE_INSET_RIGHT)
+        inset_top = int(CAT_EDGE_INSET_TOP)
+        inset_bottom = int(CAT_EDGE_INSET_BOTTOM)
+
+        left = int(cat.x + inset_left - extra)
+        top = int(cat.y + inset_top - extra)
+        width = int(cat.width - inset_left - inset_right + (extra * 2))
+        height = int(cat.height - inset_top - inset_bottom + (extra * 2))
+
+        width = max(1, width)
+        height = max(1, height)
+        return QRect(left, top, width, height)
 
     def _draw_cat(self, painter: QPainter, cat):
         """
@@ -1162,9 +1192,22 @@ class CatOverlay(QWidget):
         """Handle clicks on cats"""
         click_pos = event.position().toPoint()
         for cat in self.cats:
-            cat_rect = QRect(int(cat.x), int(cat.y), cat.width, cat.height)
+            cat_rect = self._cat_hit_rect(cat)
             if cat_rect.contains(click_pos):
                 self.panel_requested.emit(cat)
+                # Shoot from the clicked cat.
+                try:
+                    self.trigger_shoot(cat)
+                except Exception:
+                    pass
+                try:
+                    origin_global = self.cannon_muzzle_global(cat)
+                except Exception:
+                    origin_global = self.mapToGlobal(click_pos)
+                try:
+                    on_cat_clicked(origin_global)
+                except Exception:
+                    pass
                 event.accept()
                 return
 
@@ -1174,6 +1217,25 @@ class CatOverlay(QWidget):
             self.cats.remove(cat)
             self._update_window_mask()
             self.cats_multiplied.emit(len(self.cats))
+
+    def kill_cat_at_global(self, global_pos: QPoint, radius: int = 1) -> bool:
+        if not getattr(self, "cats", None):
+            return False
+        try:
+            local_pos = self.mapFromGlobal(global_pos)
+        except Exception:
+            return False
+        r = max(1, int(radius))
+        for cat in list(self.cats):
+            cat_rect = self._cat_hit_rect(cat, extra=r)
+            if cat_rect.contains(local_pos):
+                self.kill_cat(cat)
+                try:
+                    self.cat_killed.emit(cat)
+                except Exception:
+                    pass
+                return True
+        return False
 
 
 class MessageClient(QObject):
@@ -1207,6 +1269,41 @@ class MessageClient(QObject):
         while b"\n" in self._rx_buf:
             line, self._rx_buf = self._rx_buf.split(b"\n", 1)
             self.message_received.emit(line.decode("utf-8", errors="replace"))
+
+
+class MultiMessageClient(QObject):
+    """Manages multiple MessageClient connections in parallel."""
+    message_received = Signal(str)
+    status_changed = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._clients: dict[tuple[str, int], MessageClient] = {}
+
+    def connect_to(self, host: str = "127.0.0.1", port: int = 50505):
+        key = (str(host), int(port))
+        if key in self._clients:
+            return
+        client = MessageClient(self)
+        client.message_received.connect(self.message_received.emit)
+        client.status_changed.connect(self.status_changed.emit)
+        self._clients[key] = client
+        client.connect_to(host, port)
+
+    def disconnect(self):
+        for client in list(self._clients.values()):
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+        self._clients.clear()
+
+    def send(self, text: str):
+        for client in list(self._clients.values()):
+            try:
+                client.send(text)
+            except Exception:
+                pass
 
 
 # ---- Zeroconf P2P ----
@@ -1522,6 +1619,7 @@ class ProjectileOverlay(QWidget):
         *,
         radius: int = 10,
         color: QColor = None,
+        allow_kill: bool = True,
     ):
         super().__init__()
         self.setWindowFlags(
@@ -1545,6 +1643,7 @@ class ProjectileOverlay(QWidget):
         self._g = float(g)
         self._t_end = max(0.0, float(t_end))
         self._color = QColor(color) if color is not None else QColor(_PROJECTILE_COLOR)
+        self._allow_kill = bool(allow_kill)
 
         self._radius = max(2, int(radius))
         d = self._radius * 4 + 2
@@ -1571,6 +1670,16 @@ class ProjectileOverlay(QWidget):
     def _set_center(self, p: QPoint):
         self.move(int(p.x() - self.width() // 2), int(p.y() - self.height() // 2))
 
+    def _check_kill(self, p: QPoint) -> bool:
+        try:
+            if not self._allow_kill:
+                return False
+            if _CAT_OVERLAY is None:
+                return False
+            return _CAT_OVERLAY.kill_cat_at_global(p)
+        except Exception:
+            return False
+
     def _tick(self):
         now = QDateTime.currentMSecsSinceEpoch()
         t = (now - self._t0_ms) / 1000.0
@@ -1583,7 +1692,16 @@ class ProjectileOverlay(QWidget):
             self.deleteLater()
             return
 
-        self._set_center(self._pos_at(t))
+        pos = self._pos_at(t)
+        self._set_center(pos)
+        if self._check_kill(pos):
+            try:
+                self._timer.stop()
+            except Exception:
+                pass
+            self.finished.emit(pos)
+            self.close()
+            self.deleteLater()
 
     def set_color(self, color: QColor):
         if color is None or not color.isValid():
@@ -2014,7 +2132,7 @@ def shoot_projectile_local_exit_right(start_global_pos: QPoint, vx: float, vy: f
         return "Projectile already past right edge"
 
     try:
-        proj = ProjectileOverlay(geo, sx, sy, vx, vy, g, t_end)
+        proj = ProjectileOverlay(geo, sx, sy, vx, vy, g, t_end, allow_kill=False)
     except Exception as e:
         return f"Failed to start projectile: {e}"
 
@@ -2149,7 +2267,7 @@ def shoot_projectile_local_exit_left(start_global_pos: QPoint, vx: float, vy: fl
         return "Projectile already past left edge"
 
     try:
-        proj = ProjectileOverlay(geo, sx, sy, vx, vy, g, t_end)
+        proj = ProjectileOverlay(geo, sx, sy, vx, vy, g, t_end, allow_kill=False)
     except Exception as e:
         return f"Failed to start projectile: {e}"
 
@@ -2695,8 +2813,7 @@ def _first_ipv4(addresses: list[bytes]) -> str:
     return None
 
 
-# Auto-connect client to the first discovered peer (if not already connected).
-_connected_to: tuple[str, int] = None
+# Auto-connect client to all discovered peers (deduped by host/port).
 
 
 # When the cat is clicked, the projectile direction is determined by _SHOOT_DIRECTION.
@@ -2825,7 +2942,7 @@ if __name__ == "__main__":
 
     # Listen on all interfaces so peers can connect.
     server = MessageServer()
-    client = MessageClient()
+    client = MultiMessageClient()
     server.start(get_lan_ip(), 50505)
 
     # Zeroconf peer discovery + advertising.
@@ -2833,10 +2950,6 @@ if __name__ == "__main__":
     zc.start()
 
     def on_peer(name: str, host: str, port: int):
-        global _connected_to
-        if _connected_to == (host, port):
-            return
-        _connected_to = (host, port)
         client.connect_to(host, port)
 
     zc.peer_found.connect(on_peer)
