@@ -2581,7 +2581,7 @@ class ControlPanel(QWidget):
         self.server = server
         self.client = client
 
-        self.setWindowTitle("Sprite Control Panel")
+        self.setWindowTitle("Cats Control Panel")
 
         root = QVBoxLayout(self)
 
