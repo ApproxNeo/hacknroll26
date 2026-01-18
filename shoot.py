@@ -8,6 +8,9 @@ import random
 import subprocess
 from pathlib import Path
 import math
+os.environ["QT_MEDIA_BACKEND"] = "ffmpeg"
+os.environ["QT_AUDIO_BACKEND"] = "pw-play"
+
 from PySide6.QtGui import QPainter, QPixmap, QMovie, QColor, QPen, QBrush, QPainterPath, QPolygon, QRegion
 from PySide6.QtCore import QRect
 
@@ -28,6 +31,7 @@ ASSET_DIR = BASE_DIR / "assets"
 EXPLOSION_GIF = ASSET_DIR / "anims/explode.gif"
 EXPLOSION_MP3 = ASSET_DIR / "sounds/explode.mp3"
 PEW_MP3 = ASSET_DIR / "sounds/pew.mp3"
+YIPPIE_MP3 = ASSET_DIR / "sounds/yippie.mp3"
 PROJECTILE_PNG = ASSET_DIR / "sprites/projectile.png"
 SETTINGS_PATH = BASE_DIR / "control_panel_settings.json"
 
@@ -39,7 +43,7 @@ _PROJECTILE_TINTED: dict[tuple[int, int], QPixmap] = {}
 # Default colors (customizable via control panel).
 _PROJECTILE_COLOR = QColor(110, 110, 110)
 
-os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.ffmpeg*=false")
+os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.ffmpeg*=true")
 
 def _parse_color(text: str) -> QColor:
     if not text:
